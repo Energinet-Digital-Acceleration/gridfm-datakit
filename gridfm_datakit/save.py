@@ -205,7 +205,20 @@ def save_node_edge_data(
         columns=["index1", "index2", "G", "B"],
     )
 
-    adj_df[["index1", "index2"]] = adj_df[["index1", "index2"]].astype("int64")
+    # Convert index columns to integers first, then format as strings with .0
+    adj_df["index1"] = adj_df["index1"].astype("int64").apply(lambda x: f"{x}.0")
+    adj_df["index2"] = adj_df["index2"].astype("int64").apply(lambda x: f"{x}.0")
+
+    # Format G column with 16 decimals but remove trailing zeros
+    def format_float_no_trailing_zeros(x, decimals):
+        s = f"{x:.{decimals}f}"
+        s = s.rstrip('0').rstrip('.')
+        if '.' not in s:
+            s += '.0'
+        return s
+
+    adj_df["G"] = adj_df["G"].astype("float64").apply(lambda x: format_float_no_trailing_zeros(x, 16))
+    adj_df["B"] = adj_df["B"].astype("float64").apply(lambda x: format_float_no_trailing_zeros(x, 16))
 
     # Shift scenario indices
     scenario_indices = np.concatenate(
