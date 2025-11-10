@@ -14,3 +14,5 @@ notebooks/test_data
 tests/test_data
 tests/test_data_contingency
 build/
+.idea
+uv.lock
