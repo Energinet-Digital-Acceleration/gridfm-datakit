@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="case30_ieee_mellson" type="PythonConfigurationType" factoryName="Python">
+  <configuration default="false" name="case30_ieee_pypowsybl " type="PythonConfigurationType" factoryName="Python">
     <module name="gridfm-datakit" />
     <option name="ENV_FILES" value="" />
     <option name="INTERPRETER_OPTIONS" value="" />
@@ -15,7 +15,7 @@
     <option name="ADD_SOURCE_ROOTS" value="true" />
     <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
     <option name="SCRIPT_NAME" value="gridfm_datakit/cli.py" />
-    <option name="PARAMETERS" value="scripts/config/case30_ieee_mellson.yaml" />
+    <option name="PARAMETERS" value="scripts/config/case30_ieee_pypowsybl.yaml" />
     <option name="SHOW_COMMAND_LINE" value="false" />
     <option name="EMULATE_TERMINAL" value="false" />
     <option name="MODULE_MODE" value="false" />
