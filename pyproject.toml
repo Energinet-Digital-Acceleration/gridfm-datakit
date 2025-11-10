@@ -26,6 +26,7 @@ dependencies = [
     "pandas",
     "pathlib",
     "plotly",
+    "pypowsybl",
     "pyaml",
     "requests",
     "urllib3<2.0.0",

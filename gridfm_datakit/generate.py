@@ -30,6 +30,7 @@ from gridfm_datakit.network import (
     load_net_from_pp,
     load_net_from_file,
     load_net_from_pglib,
+    load_net_from_pypowsybl,
 )
 from gridfm_datakit.perturbations.load_perturbation import (
     load_scenarios_to_df,
@@ -134,6 +135,8 @@ def _prepare_network_and_scenarios(
         net = load_net_from_pp(args.network.name)
     elif args.network.source == "pglib":
         net = load_net_from_pglib(args.network.name)
+    elif args.network.source == "pypowsybl":
+        net = load_net_from_pypowsybl(args.network.name)
     elif args.network.source == "file":
         net = load_net_from_file(
             os.path.join(args.network.network_dir, args.network.name) + ".m",

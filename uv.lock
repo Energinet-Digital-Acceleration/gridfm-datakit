@@ -545,6 +545,7 @@ dependencies = [
     { name = "pathlib" },
     { name = "plotly" },
     { name = "pyaml" },
+    { name = "pypowsybl" },
     { name = "requests" },
     { name = "urllib3" },
 ]
@@ -584,6 +585,7 @@ requires-dist = [
     { name = "plotly" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pyaml" },
+    { name = "pypowsybl" },
     { name = "pytest", marker = "extra == 'test'" },
     { name = "pytest-cov", marker = "extra == 'test'" },
     { name = "requests" },
@@ -1538,6 +1540,18 @@ wheels = [
 ]
 
 [[package]]
+name = "prettytable"
+version = "3.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "wcwidth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/99/b1/85e18ac92afd08c533603e3393977b6bc1443043115a47bb094f3b98f94f/prettytable-3.16.0.tar.gz", hash = "sha256:3c64b31719d961bf69c9a7e03d0c1e477320906a98da63952bc6698d6164ff57", size = 66276, upload-time = "2025-03-24T19:39:04.008Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/02/c7/5613524e606ea1688b3bdbf48aa64bafb6d0a4ac3750274c43b6158a390f/prettytable-3.16.0-py3-none-any.whl", hash = "sha256:b5eccfabb82222f5aa46b798ff02a8452cf530a352c31bddfa29be41242863aa", size = 33863, upload-time = "2025-03-24T19:39:02.359Z" },
+]
+
+[[package]]
 name = "prompt-toolkit"
 version = "3.0.52"
 source = { registry = "https://pypi.org/simple" }
@@ -1631,6 +1645,31 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f2/a5/181488fc2b9d093e3972d2a472855aae8a03f000592dbfce716a512b3359/pyparsing-3.2.5.tar.gz", hash = "sha256:2df8d5b7b2802ef88e8d016a2eb9c7aeaa923529cd251ed0fe4608275d4105b6", size = 1099274, upload-time = "2025-09-21T04:11:06.277Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/5e/1aa9a93198c6b64513c9d7752de7422c06402de6600a8767da1524f9570b/pyparsing-3.2.5-py3-none-any.whl", hash = "sha256:e38a4f02064cf41fe6593d328d0512495ad1f3d8a91c4f73fc401b3079a59a5e", size = 113890, upload-time = "2025-09-21T04:11:04.117Z" },
+]
+
+[[package]]
+name = "pypowsybl"
+version = "1.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "networkx", version = "3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pandas" },
+    { name = "prettytable" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/47/11a65115430084b0818fdbd99f721ef4d84544a563300951781c6e6211dc/pypowsybl-1.13.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:61b32a4d1950ae3a43c77075e14f11ed5827b821227ccc384cb3766ab2a069fd", size = 70990573, upload-time = "2025-10-31T11:48:04.928Z" },
+    { url = "https://files.pythonhosted.org/packages/79/90/aded7247bc45f4f59d4a459d4819599610bbfb166678aa5ff2e2476ddd10/pypowsybl-1.13.0-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:0e510ba3acc847f4440b3518eded7816487ca8e3128a5b9088761cc3573321ac", size = 72084107, upload-time = "2025-10-31T11:48:26.527Z" },
+    { url = "https://files.pythonhosted.org/packages/41/78/e1fa73f46a5b0cacc25eca40b824ae3c86c04d314f22c369eb6d2be1399f/pypowsybl-1.13.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3656df0c6abf4ff4d94cfa6fefbc7e79d601dbfb15991c6b2daf82d1b457c984", size = 86034857, upload-time = "2025-10-31T11:48:49.438Z" },
+    { url = "https://files.pythonhosted.org/packages/50/8a/c81697790de777b161d8e6bc8c474d19dd1ab886b5cd78376f3b2d9c2ab0/pypowsybl-1.13.0-cp310-cp310-win_amd64.whl", hash = "sha256:d758c3845c67d38b4472d7717bd15f184a05ee339d70a51ac0c35fcc2a403011", size = 67893956, upload-time = "2025-10-31T11:49:12.065Z" },
+    { url = "https://files.pythonhosted.org/packages/59/77/5bace602ff0da02820440edb736e57fc7195b611a6643d89f2facf9b6f9b/pypowsybl-1.13.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:3e41a619d5afad8ac44db2cd05077aab27464f76c38d5b063ed5e4ee18a2072e", size = 70991607, upload-time = "2025-10-31T11:48:09.476Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/eb/0509452ea82f2cefb933da28a566a277f2461909c23c90a21bd2a92d3aff/pypowsybl-1.13.0-cp311-cp311-macosx_11_0_x86_64.whl", hash = "sha256:d0678b2e142a17d4cce0ee796fdafc39c3e82516c5d1c11190c0a709fa2bf21c", size = 72085402, upload-time = "2025-10-31T11:48:30.632Z" },
+    { url = "https://files.pythonhosted.org/packages/82/9e/f3025c545a6b9a0c244eb6ee6e024db0aec81ee822fe67d1a9d59249ce30/pypowsybl-1.13.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6486d4d9b3051dac1bfb2a5c41ea06eecc87d5f8c550aaad5cbbd05aad9c9609", size = 86036810, upload-time = "2025-10-31T11:48:53.76Z" },
+    { url = "https://files.pythonhosted.org/packages/05/06/6e9770d5abd0fe952983afc69a9c58a063eb2b3743e9d767ee471563c804/pypowsybl-1.13.0-cp311-cp311-win_amd64.whl", hash = "sha256:0d872a1c0bd41a56ed7388151e1737eeff0d4c3a9ed824130d052659fd736faf", size = 67894822, upload-time = "2025-10-31T11:49:16.228Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/8e/c48bfca69890f30492abc3780cca3bec3fc0aca7c5ad7bc5305035c7dc7f/pypowsybl-1.13.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:0f4dc13bc6f693c51dd86dc880d4a68405573da60123071273656f66044adcca", size = 70992617, upload-time = "2025-10-31T11:48:13.912Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/77/2f6a5a18f7763123d65db570df1b40e62a07d3beb16347c93095c20beb4c/pypowsybl-1.13.0-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:38efaad2647d0d9d528fe3ad51ebe96897c239db32ec64b242249a2df089af5e", size = 72092699, upload-time = "2025-10-31T11:48:35.157Z" },
+    { url = "https://files.pythonhosted.org/packages/be/87/703fe3f26251d9946093386db7dcb0b7ad4429cc64e94393d521567cf860/pypowsybl-1.13.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:6a3da4560e9ca6e2d63beb4bbf7f643aab165fe61ad94812e3ed29fa087108f2", size = 86021852, upload-time = "2025-10-31T11:48:58.322Z" },
+    { url = "https://files.pythonhosted.org/packages/20/1f/b429780aecacb2a753ba5849a1f315e868eeaa72f6e9e29e3150d6e89849/pypowsybl-1.13.0-cp312-cp312-win_amd64.whl", hash = "sha256:962972a4d05ea9b71310d9b83bcf1aa9a71ffbe182faafaf18d63858b0bbd06b", size = 67896736, upload-time = "2025-10-31T11:49:20.555Z" },
 ]
 
 [[package]]
