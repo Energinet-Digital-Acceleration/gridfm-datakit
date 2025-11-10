@@ -3,7 +3,8 @@ from pandapower.auxiliary import pandapowerNet
 import requests
 from importlib import resources
 import pandapower as pp
-import pypowsybl as pps
+from pypowsybl.network import Network
+import pypowsybl.network as ppsn
 import pandapower.networks as pn
 import warnings
 
@@ -94,17 +95,17 @@ def load_net_from_pglib(grid_name: str) -> pandapowerNet:
 
     return network
 
-def load_net_from_pypowsybl(grid_name: str) -> pps.network.Network:
-    if grid_name == "ieee9":
-        return pps.network.create_ieee9()
-    elif grid_name == "ieee14":
-        return pps.network.create_ieee14()
-    elif grid_name == "ieee30":
-        return pps.network.create_ieee30()
-    elif grid_name == "ieee57":
-        return pps.network.create_ieee57()
-    elif grid_name == "ieee118":
-        return pps.network.create_ieee118()
-    elif grid_name == "ieee300":
-        return pps.network.create_ieee300()
+def load_net_from_pypowsybl(grid_name: str) -> Network:
+    if grid_name == "case9_ieee":
+        return ppsn.create_ieee9()
+    elif grid_name == "case14_ieee":
+        return ppsn.create_ieee14()
+    elif grid_name == "case30_ieee":
+        return ppsn.create_ieee30()
+    elif grid_name == "case57_ieee":
+        return ppsn.create_ieee57()
+    elif grid_name == "case118_ieee":
+        return ppsn.create_ieee118()
+    elif grid_name == "case300_ieee":
+        return ppsn.create_ieee300()
     raise ValueError("Invalid grid name!")
