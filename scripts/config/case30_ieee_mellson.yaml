@@ -1,7 +1,6 @@
 network:
   name: "case30_ieee" # Name of the power grid network (without extension)
   source: "pglib" # Data source for the grid; options: pglib, pandapower, file
-  network_dir: "scripts/grids" # if using source "file", this is the directory containing the network file (relative to the project root)
 
 load:
   generator: "powergraph" # Name of the load generator; options: agg_load_profile, powergraph

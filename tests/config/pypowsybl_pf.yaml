@@ -1,0 +1,37 @@
+network:
+  name: "case30_ieee" # Name of the power grid network
+  source: "pypowsybl" # Data source for the grid; options: pglib, pandapower, file, pypowsybl
+  network_dir: "gridfm_datakit/grids" # Path to the grid data file
+
+load:
+  generator: "powergraph" # Name of the load generator; options: agg_load_profile, powergraph
+  agg_profile: "default" # Name of the aggregated load profile
+  scenarios: 2 # Number of different load scenarios to generate
+  sigma: 0.05 # max local noise (not used by powergraph)
+  change_reactive_power: false # Powergraph does not change reactive power
+  global_range: 0.4 # Range of the global scaling factor (not used by powergraph)
+  max_scaling_factor: 4.0 # Max upper bound of the global scaling factor (not used by powergraph)
+  step_size: 0.025 # Step size when finding the upper bound (not used by powergraph)
+  start_scaling_factor: 0.8 # Initial value of the global scaling factor (not used by powergraph)
+
+topology_perturbation:
+  k: 1 # Maximum number of components to drop in each perturbation
+  n_topology_variants: 3 # Number of unique perturbed topologies per scenario
+  type: "random" # Type of topology generator; options: n_minus_k, random, none
+  elements: ["line", "trafo"] # elements to perturb options: line, trafo (gen/sgen not recommended for pypowsybl)
+
+generation_perturbation:
+  type: "none" # pypowsybl does not support generator cost perturbations
+  sigma: 1.0 # Size of range use for sampling scaling factor (not used when type=none)
+
+admittance_perturbation:
+  type: random_perturbation # Type of admittance perturbation; options: random_perturbation, none
+  sigma: 0.2 # Size of range used for sampling scaling factor
+
+settings:
+  num_processes: 2 # Number of parallel processes to use
+  data_dir: "tests/test_data" # Directory to save generated data
+  large_chunk_size: 2 # Number of load scenarios processed before saving
+  no_stats: false # If true, disables statistical calculations
+  overwrite: true # If true, overwrites existing files
+  mode: "pf" # Mode of the script; pypowsybl only supports "pf" mode currently

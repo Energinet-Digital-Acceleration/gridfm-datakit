@@ -1,5 +1,7 @@
 import numpy as np
 import pandapower as pp
+from pandapower.auxiliary import pandapowerNet
+from pypowsybl.network import Network
 from abc import ABC, abstractmethod
 from typing import Generator, List, Union
 
@@ -15,8 +17,8 @@ class GenerationGenerator(ABC):
     @abstractmethod
     def generate(
         self,
-        example_generator: Generator[pp.pandapowerNet, None, None],
-    ) -> Union[Generator[pp.pandapowerNet, None, None], List[pp.pandapowerNet]]:
+        example_generator: Generator[Union[pandapowerNet, Network], None, None],
+    ) -> Union[Generator[Union[pandapowerNet, Network], None, None], List[Union[pandapowerNet, Network]]]:
         """Generate generation perturbations.
 
         Args:
@@ -38,8 +40,8 @@ class NoGenPerturbationGenerator(GenerationGenerator):
 
     def generate(
         self,
-        example_generator: Generator[pp.pandapowerNet, None, None],
-    ) -> Generator[pp.pandapowerNet, None, None]:
+        example_generator: Generator[Union[pandapowerNet, Network], None, None],
+    ) -> Generator[Union[pandapowerNet, Network], None, None]:
         """Yield the original examples without any perturbations.
 
         Args:
@@ -62,21 +64,31 @@ class PermuteGenCostGenerator(GenerationGenerator):
     generators of power grid networks.
     """
 
-    def __init__(self, base_net: pp.pandapowerNet) -> None:
+    def __init__(self, base_net: Union[pandapowerNet, Network]) -> None:
         """
         Initialize the gen-cost permuation generator.
 
         Args:
-            base_net: The base power network.
+            base_net: The base power network (pandapower or pypowsybl).
+
+        Raises:
+            NotImplementedError: If using pypowsybl network (poly_cost not available).
         """
+        if isinstance(base_net, Network):
+            raise NotImplementedError(
+                "Generator cost perturbations are not supported for pypowsybl networks. "
+                "PyPowSyBl does not have poly_cost tables and does not support OPF. "
+                "Use 'none' as the generation_perturbation type for pypowsybl networks."
+            )
+
         self.base_net = base_net
         self.num_gens = len(base_net.poly_cost)
         self.permute_cols = self.base_net.poly_cost.columns[2:]
 
     def generate(
         self,
-        example_generator: Generator[pp.pandapowerNet, None, None],
-    ) -> Generator[pp.pandapowerNet, None, None]:
+        example_generator: Generator[Union[pandapowerNet, Network], None, None],
+    ) -> Generator[Union[pandapowerNet, Network], None, None]:
         """Generate a network with permuted generator cost coefficients.
 
         Args:
@@ -107,13 +119,24 @@ class PerturbGenCostGenerator(GenerationGenerator):
     from a uniform distribution.
     """
 
-    def __init__(self, base_net: pp.pandapowerNet, sigma: float) -> None:
+    def __init__(self, base_net: Union[pandapowerNet, Network], sigma: float) -> None:
         """
         Initialize the gen-cost perturbation generator.
 
         Args:
-            base_net: The base power network.
+            base_net: The base power network (pandapower or pypowsybl).
+            sigma: Range parameter for uniform distribution sampling.
+
+        Raises:
+            NotImplementedError: If using pypowsybl network (poly_cost not available).
         """
+        if isinstance(base_net, Network):
+            raise NotImplementedError(
+                "Generator cost perturbations are not supported for pypowsybl networks. "
+                "PyPowSyBl does not have poly_cost tables and does not support OPF. "
+                "Use 'none' as the generation_perturbation type for pypowsybl networks."
+            )
+
         self.base_net = base_net
         self.num_gens = len(base_net.poly_cost)
         self.perturb_cols = self.base_net.poly_cost.columns[2:]
@@ -123,18 +146,14 @@ class PerturbGenCostGenerator(GenerationGenerator):
 
     def generate(
         self,
-        example_generator: Generator[pp.pandapowerNet, None, None],
-    ) -> Generator[pp.pandapowerNet, None, None]:
+        example_generator: Generator[Union[pandapowerNet, Network], None, None],
+    ) -> Generator[Union[pandapowerNet, Network], None, None]:
         """Generate a network with perturbed generator cost coefficients.
 
         Args:
             example_generator: A generator producing example
                 (load/topology) scenarios to which generator cost coefficient
                 perturbations should be added.
-            sigma: A constant that specifies the range from which to draw
-                samples from a uniform distribution to be used as a scaling
-                factor for cost coefficient perturbations. The range is
-                set as [max([0,1-sigma]), 1+sigma)
 
         Yields:
             An example scenario with cost coeffiecients in the poly_cost

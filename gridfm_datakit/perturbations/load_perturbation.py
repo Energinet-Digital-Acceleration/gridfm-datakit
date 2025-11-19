@@ -8,6 +8,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from copy import deepcopy
 from pandapower.auxiliary import pandapowerNet
+from pypowsybl.network import Network
+from typing import Union
+from gridfm_datakit.network_interface import NetworkInterface
+from gridfm_datakit.process.solver_interface import SolverInterface
 
 
 def load_scenarios_to_df(scenarios: np.ndarray) -> pd.DataFrame:
@@ -101,14 +105,14 @@ class LoadScenarioGeneratorBase(ABC):
     @abstractmethod
     def __call__(
         self,
-        net: pandapowerNet,
+        net: Union[pandapowerNet, Network],
         n_scenarios: int,
         scenario_log: str,
     ) -> np.ndarray:
         """Generates load scenarios for a power network.
 
         Args:
-            net: The power network.
+            net: The power network (pandapower or pypowsybl).
             n_scenarios: Number of scenarios to generate.
             scenario_log: Path to log file for scenario generation details.
 
@@ -136,7 +140,7 @@ class LoadScenarioGeneratorBase(ABC):
 
     @staticmethod
     def find_largest_scaling_factor(
-        net: pandapowerNet,
+        net: Union[pandapowerNet, Network],
         max_scaling: float,
         step_size: float,
         start: float,
@@ -145,7 +149,7 @@ class LoadScenarioGeneratorBase(ABC):
         """Finds the largest load scaling factor that maintains OPF convergence.
 
         Args:
-            net: The power network.
+            net: The power network (pandapower or pypowsybl).
             max_scaling: Maximum scaling factor to try.
             step_size: Increment for scaling factor search.
             start: Starting scaling factor.
@@ -155,13 +159,24 @@ class LoadScenarioGeneratorBase(ABC):
             float: Largest scaling factor that maintains OPF convergence.
 
         Raises:
+            NotImplementedError: If using pypowsybl network (OPF not supported).
             RuntimeError: If OPF does not converge for the starting value.
         """
+        # Check if pypowsybl network - OPF not supported
+        if isinstance(net, Network):
+            raise NotImplementedError(
+                "LoadScenariosFromAggProfile requires OPF, which is not supported for pypowsybl networks. "
+                "Use the Powergraph load scenario generator instead, which only requires power flow."
+            )
+
         net = deepcopy(
             net,
-        )  # Without this, we change the base load of the network, whioch impacts the entire data gen
-        p_ref = net.load["p_mw"]
-        q_ref = net.load["q_mvar"]
+        )  # Without this, we change the base load of the network, which impacts the entire data gen
+
+        adapter = NetworkInterface.create_adapter(net)
+        loads = adapter.get_loads()
+        p_ref = loads["p_mw"].values
+        q_ref = loads["q_mvar"].values
         u = start
 
         # find upper limit
@@ -169,17 +184,32 @@ class LoadScenarioGeneratorBase(ABC):
         print("Finding upper limit u .", end="", flush=True)
 
         while (u <= max_scaling) and (converged is True):
-            net.load["p_mw"] = p_ref * u  # we scale the active power
+            loads = adapter.get_loads()
+            loads["p_mw"] = p_ref * u  # we scale the active power
             if change_reactive_power:  # if we want to change the reactive power, we scale it by the same factor as the active power
-                net.load["q_mvar"] = q_ref * u
+                loads["q_mvar"] = q_ref * u
             else:
-                net.load["q_mvar"] = q_ref
+                loads["q_mvar"] = q_ref
+            adapter.update_loads(loads)
 
             try:
-                pp.runopp(net, numba=True)
-                u += step_size  # we increment the scaling factor by the step size
-                print(".", end="", flush=True)
-            except pp.OPFNotConverged as err:
+                solver = SolverInterface.create_solver(net)
+                converged = solver.run_opf(numba=True)
+                if converged:
+                    u += step_size  # we increment the scaling factor by the step size
+                    print(".", end="", flush=True)
+                else:
+                    if u == start:
+                        raise RuntimeError(
+                            f"OPF did not converge for the starting value of u={u:.3f}",
+                        )
+                    print(
+                        f"\nOPF did not converge for u={u:.3f}. Using u={u - step_size:.3f} for upper limit",
+                        flush=True,
+                    )
+                    u -= step_size
+                    converged = False
+            except Exception as err:
                 if u == start:
                     raise RuntimeError(
                         f"OPF did not converge for the starting value of u={u:.3f}, {err}",
@@ -306,14 +336,14 @@ class LoadScenariosFromAggProfile(LoadScenarioGeneratorBase):
 
     def __call__(
         self,
-        net: pandapowerNet,
+        net: Union[pandapowerNet, Network],
         n_scenarios: int,
         scenarios_log: str,
     ) -> np.ndarray:
         """Generates load profiles based on aggregated load data.
 
         Args:
-            net: The power network.
+            net: The power network (pandapower or pypowsybl).
             n_scenarios: Number of scenarios to generate.
             scenarios_log: Path to log file for scenario generation details.
 
@@ -321,6 +351,7 @@ class LoadScenariosFromAggProfile(LoadScenarioGeneratorBase):
             numpy.ndarray: Array of shape (n_loads, n_scenarios, 2) containing p_mw and q_mvar values.
 
         Raises:
+            NotImplementedError: If using pypowsybl network (requires OPF).
             ValueError: If start_scaling_factor is less than global_range.
         """
         if (
@@ -355,9 +386,16 @@ class LoadScenariosFromAggProfile(LoadScenarioGeneratorBase):
         print("min, max of ref_curve: {}, {}".format(ref_curve.min(), ref_curve.max()))
         print("l, u: {}, {}".format(lower, u))
 
-        p_mw_array = net.load.p_mw.to_numpy()  # we now store the active power at the load elements level, we don't aggregate it at the bus level (which was probably not changing anything since there is usually max one load per bus)
+        adapter = NetworkInterface.create_adapter(net)
+        loads = adapter.get_loads()
 
-        q_mvar_array = net.load.q_mvar.to_numpy()
+        # Get appropriate column names based on network type
+        if isinstance(net, pandapowerNet):
+            p_mw_array = loads["p_mw"].to_numpy()
+            q_mvar_array = loads["q_mvar"].to_numpy()
+        else:  # pypowsybl
+            p_mw_array = loads["p0"].to_numpy()
+            q_mvar_array = loads["q0"].to_numpy()
 
         # if the number of requested scenarios is smaller than the number of timesteps in the load profile, we cut the load profile
         if n_scenarios <= ref_curve.shape[0]:
@@ -452,14 +490,14 @@ class Powergraph(LoadScenarioGeneratorBase):
 
     def __call__(
         self,
-        net: pandapowerNet,
+        net: Union[pandapowerNet, Network],
         n_scenarios: int,
         scenario_log: str,
     ) -> np.ndarray:
         """Generates load profiles based on aggregated load data.
 
         Args:
-            net: The power network.
+            net: The power network (pandapower or pypowsybl).
             n_scenarios: Number of scenarios to generate.
             scenario_log: Path to log file for scenario generation details.
 
@@ -474,9 +512,16 @@ class Powergraph(LoadScenarioGeneratorBase):
         ref_curve = agg_load / agg_load.max()
         print("u={}, l={}".format(ref_curve.max(), ref_curve.min()))
 
-        p_mw_array = net.load.p_mw.to_numpy()  # we now store the active power at the load elements level, we don't aggregate it at the bus level (which was probably not changing anything since there is usually max one load per bus)
+        adapter = NetworkInterface.create_adapter(net)
+        loads = adapter.get_loads()
 
-        q_mvar_array = net.load.q_mvar.to_numpy()
+        # Get appropriate column names based on network type
+        if isinstance(net, pandapowerNet):
+            p_mw_array = loads["p_mw"].to_numpy()
+            q_mvar_array = loads["q_mvar"].to_numpy()
+        else:  # pypowsybl
+            p_mw_array = loads["p0"].to_numpy()
+            q_mvar_array = loads["q0"].to_numpy()
 
         # if the number of requested scenarios is smaller than the number of timesteps in the load profile, we cut the load profile
         if n_scenarios <= ref_curve.shape[0]:

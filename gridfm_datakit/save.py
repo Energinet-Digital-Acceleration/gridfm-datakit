@@ -2,26 +2,64 @@ import pandapower as pp
 import numpy as np
 import pandas as pd
 from pandapower.auxiliary import pandapowerNet
+from pypowsybl.network import Network
 import os
 from pandapower.pypower.idx_brch import T_BUS, F_BUS, RATE_A
 from pandapower.pypower.makeYbus import branch_vectors
-from typing import List
+from typing import List, Union
+from gridfm_datakit.network_interface import NetworkInterface
+from gridfm_datakit.process.solver_interface import SolverInterface
 
 
-def save_edge_params(net: pandapowerNet, path: str):
+def save_edge_params(net: Union[pandapowerNet, Network], path: str):
     """Saves edge parameters for the network to a CSV file.
 
     Extracts and saves branch parameters including admittance matrices and rate limits.
 
     Args:
-        net: The power network.
+        net: The power network (pandapower or pypowsybl).
         path: Path where the edge parameters CSV file should be saved.
     """
-    pp.rundcpp(net)  # need to run dcpp to create the ppc structure
-    ppc = net._ppc
+    # Run DCPF to create ppc structure if needed
+    if isinstance(net, pandapowerNet):
+        pp.rundcpp(net)
+        ppc = net._ppc
+    else:  # pypowsybl
+        # Run DC power flow to populate results
+        solver = SolverInterface.create_solver(net)
+        solver.run_dcpf()
+
+        # Get ppc structure via adapter
+        adapter = NetworkInterface.create_adapter(net)
+        ppc = adapter.get_ppc()
     to_bus = np.real(ppc["branch"][:, T_BUS])
     from_bus = np.real(ppc["branch"][:, F_BUS])
-    Ytt, Yff, Yft, Ytf = branch_vectors(ppc["branch"], ppc["branch"].shape[0])
+
+    # Calculate branch admittances
+    if isinstance(net, pandapowerNet):
+        # For pandapower, use branch_vectors which handles asymmetric branches
+        Ytt, Yff, Yft, Ytf = branch_vectors(ppc["branch"], ppc["branch"].shape[0])
+    else:
+        # For pypowsybl, calculate admittances directly from ppc branch data
+        # ppc["branch"] format: [fbus, tbus, r, x, b, rate_a, rate_b, rate_c, tap, shift, status]
+        from pandapower.pypower.idx_brch import BR_R, BR_X, BR_B
+
+        r = ppc["branch"][:, BR_R]
+        x = ppc["branch"][:, BR_X]
+        b = ppc["branch"][:, BR_B]
+
+        # Series admittance
+        y_series = 1.0 / (r + 1j * x)
+
+        # Shunt admittance (split equally)
+        y_shunt = 1j * b / 2.0
+
+        # Branch admittances (simplified pi-model)
+        Yff = y_series + y_shunt
+        Yft = -y_series
+        Ytf = -y_series
+        Ytt = y_series + y_shunt
+
     Ytt_r = np.real(Ytt)
     Ytt_i = np.imag(Ytt)
     Yff_r = np.real(Yff)
@@ -67,20 +105,37 @@ def save_edge_params(net: pandapowerNet, path: str):
     edge_params.to_csv(path, index=False)
 
 
-def save_bus_params(net: pandapowerNet, path: str):
+def save_bus_params(net: Union[pandapowerNet, Network], path: str):
     """Saves bus parameters for the network to a CSV file.
 
     Extracts and saves bus parameters including voltage limits and base values.
 
     Args:
-        net: The power network.
+        net: The power network (pandapower or pypowsybl).
         path: Path where the bus parameters CSV file should be saved.
     """
-    idx = net.bus.index
-    base_kv = net.bus.vn_kv
-    bus_type = net.bus.type
-    vmin = net.bus.min_vm_pu
-    vmax = net.bus.max_vm_pu
+    adapter = NetworkInterface.create_adapter(net)
+    buses = adapter.get_buses()
+
+    idx = buses.index
+    bus_type = buses["type"]
+
+    if isinstance(net, pandapowerNet):
+        base_kv = buses["vn_kv"]
+        vmin = buses["min_vm_pu"]
+        vmax = buses["max_vm_pu"]
+    else:  # pypowsybl
+        # Get voltage levels for base voltage
+        vl = net.get_voltage_levels()
+        # Map buses to voltage levels
+        bus_vl_map = buses["voltage_level_id"].map(vl["nominal_v"])
+        base_kv = bus_vl_map.values
+
+        # Get voltage limits
+        vmin_map = buses["voltage_level_id"].map(vl["low_voltage_limit"])
+        vmax_map = buses["voltage_level_id"].map(vl["high_voltage_limit"])
+        vmin = (vmin_map / base_kv).fillna(0.9).values
+        vmax = (vmax_map / base_kv).fillna(1.1).values
 
     bus_params = pd.DataFrame(
         np.column_stack((idx, bus_type, vmin, vmax, base_kv)),
@@ -120,7 +175,7 @@ def save_branch_idx_removed(branch_idx_removed: List[List[int]], path: str):
 
 
 def save_node_edge_data(
-    net: pandapowerNet,
+    net: Union[pandapowerNet, Network],
     node_path: str,
     edge_path: str,
     csv_data: list,
@@ -133,14 +188,15 @@ def save_node_edge_data(
     appending to existing files if they exist.
 
     Args:
-        net: The power network.
+        net: The power network (pandapower or pypowsybl).
         node_path: Path where node data should be saved.
         edge_path: Path where edge data should be saved.
         csv_data: List of node-level data for each scenario.
         adjacency_lists: List of edge-level adjacency lists for each scenario.
         mode: Analysis mode, either 'pf' for power flow or 'contingency' for contingency analysis.
     """
-    n_buses = net.bus.shape[0]
+    adapter = NetworkInterface.create_adapter(net)
+    n_buses = adapter.get_num_buses()
 
     # Determine last scenario index
     last_scenario = -1

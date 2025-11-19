@@ -1,7 +1,10 @@
 import numpy as np
 import pandapower as pp
+from pandapower.auxiliary import pandapowerNet
+from pypowsybl.network import Network
 from abc import ABC, abstractmethod
 from typing import Generator, List, Union
+from gridfm_datakit.network_interface import NetworkInterface
 
 
 class AdmittanceGenerator(ABC):
@@ -14,8 +17,8 @@ class AdmittanceGenerator(ABC):
     @abstractmethod
     def generate(
         self,
-        example_generator: Generator[pp.pandapowerNet, None, None],
-    ) -> Union[Generator[pp.pandapowerNet, None, None], List[pp.pandapowerNet]]:
+        example_generator: Generator[Union[pandapowerNet, Network], None, None],
+    ) -> Union[Generator[Union[pandapowerNet, Network], None, None], List[Union[pandapowerNet, Network]]]:
         """Generate admittance perturbations.
 
         Args:
@@ -37,8 +40,8 @@ class NoAdmittancePerturbationGenerator(AdmittanceGenerator):
 
     def generate(
         self,
-        example_generator: Generator[pp.pandapowerNet, None, None],
-    ) -> Generator[pp.pandapowerNet, None, None]:
+        example_generator: Generator[Union[pandapowerNet, Network], None, None],
+    ) -> Generator[Union[pandapowerNet, Network], None, None]:
         """Yield the original examples without any perturbations.
 
         Args:
@@ -63,24 +66,38 @@ class PerturbAdmittanceGenerator(AdmittanceGenerator):
     bound.
     """
 
-    def __init__(self, base_net: pp.pandapowerNet, sigma: float) -> None:
+    def __init__(self, base_net: Union[pandapowerNet, Network], sigma: float) -> None:
         """
         Initialize the line admittance perturbation generator.
 
         Args:
-            base_net: The base power network.
+            base_net: The base power network (pandapower or pypowsybl).
+            sigma: Range parameter for uniform distribution sampling.
         """
         self.base_net = base_net
-        self.r_original = self.base_net.line["r_ohm_per_km"].values
-        self.x_original = self.base_net.line["x_ohm_per_km"].values
+        adapter = NetworkInterface.create_adapter(base_net)
+        lines = adapter.get_lines()
+
+        # Determine column names based on network type
+        # Pandapower: r_ohm_per_km, x_ohm_per_km (per unit length)
+        # PyPowSyBl: r, x (absolute values in Ohms)
+        if isinstance(base_net, pandapowerNet):
+            self.r_col = "r_ohm_per_km"
+            self.x_col = "x_ohm_per_km"
+        else:  # pypowsybl
+            self.r_col = "r"
+            self.x_col = "x"
+
+        self.r_original = lines[self.r_col].values
+        self.x_original = lines[self.x_col].values
         self.lower = np.max([0.0, 1.0 - sigma])
         self.upper = 1.0 + sigma
         self.sample_size = self.r_original.shape[0]
 
     def generate(
         self,
-        example_generator: Generator[pp.pandapowerNet, None, None],
-    ) -> Generator[pp.pandapowerNet, None, None]:
+        example_generator: Generator[Union[pandapowerNet, Network], None, None],
+    ) -> Generator[Union[pandapowerNet, Network], None, None]:
         """Generate a network with perturbed line admittance values.
 
         Args:
@@ -88,26 +105,28 @@ class PerturbAdmittanceGenerator(AdmittanceGenerator):
                 (load/topology/generation) scenarios to which line admittance
                 perturbations are added.
 
-            sigma: A constant that specifies the range from which to draw
-                samples from a uniform distribution to be used as a scaling
-                factor for resistance and and reactance. The range is
-                set as [max([0,1-sigma]), 1+sigma)
-
         Yields:
             An example scenario with random perturbations applied to line
             admittances.
         """
         for example in example_generator:
-            example.line["r_ohm_per_km"] = np.random.uniform(
+            adapter = NetworkInterface.create_adapter(example)
+            lines = adapter.get_lines()
+
+            # Apply perturbations to resistance and reactance
+            lines[self.r_col] = np.random.uniform(
                 self.lower * self.r_original,
                 self.upper * self.r_original,
                 self.r_original.shape[0],
             )
 
-            example.line["x_ohm_per_km"] = np.random.uniform(
+            lines[self.x_col] = np.random.uniform(
                 self.lower * self.x_original,
                 self.upper * self.x_original,
                 self.x_original.shape[0],
             )
+
+            # Update lines using adapter
+            adapter.update_lines(lines)
 
             yield example

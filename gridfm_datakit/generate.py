@@ -37,6 +37,7 @@ from gridfm_datakit.perturbations.load_perturbation import (
     plot_load_scenarios_combined,
 )
 from pandapower.auxiliary import pandapowerNet
+from pypowsybl.network import Network
 import gc
 from datetime import datetime
 from tqdm import tqdm
@@ -120,7 +121,7 @@ def _setup_environment(
 def _prepare_network_and_scenarios(
     args: NestedNamespace,
     file_paths: Dict[str, str],
-) -> Tuple[pandapowerNet, Any]:
+) -> Tuple[Union[pandapowerNet, Network], Any]:
     """Prepare the network and generate load scenarios.
 
     Args:
@@ -129,6 +130,9 @@ def _prepare_network_and_scenarios(
 
     Returns:
         Tuple of (network, scenarios)
+
+    Raises:
+        ValueError: If invalid configuration for pypowsybl networks
     """
     # Load network
     if args.network.source == "pandapower":
@@ -145,7 +149,34 @@ def _prepare_network_and_scenarios(
         raise ValueError("Invalid grid source!")
 
     network_preprocessing(net)
-    assert (net.sgen["scaling"] == 1).all(), "Scaling factor >1 not supported yet!"
+
+    # PyPowSyBl-specific validations
+    if isinstance(net, Network):
+        # Mode validation: only "pf" mode is fully supported for pypowsybl
+        if args.settings.mode != "pf":
+            raise ValueError(
+                f"Only mode='pf' is currently supported for pypowsybl networks. "
+                f"Got mode='{args.settings.mode}'. Contingency mode support is planned for future releases."
+            )
+
+        # Load scenario generator validation
+        if args.load.generator == "agg_profile":
+            raise ValueError(
+                "LoadScenariosFromAggProfile (generator='agg_profile') requires OPF, "
+                "which is not supported for pypowsybl networks. "
+                "Use generator='powergraph' instead."
+            )
+
+        # Generation perturbation validation
+        if args.generation_perturbation.type != "none":
+            raise ValueError(
+                "Generator cost perturbations are not supported for pypowsybl networks. "
+                "PyPowSyBl does not have poly_cost tables and does not support OPF. "
+                "Set generation_perturbation.type='none' for pypowsybl networks."
+            )
+    else:
+        # Pandapower-specific validations
+        assert (net.sgen["scaling"] == 1).all(), "Scaling factor >1 not supported yet!"
 
     # Generate load scenarios
     load_scenario_generator = get_load_scenario_generator(args.load)
@@ -164,7 +195,7 @@ def _prepare_network_and_scenarios(
 
 
 def _save_generated_data(
-    net: pandapowerNet,
+    net: Union[pandapowerNet, Network],
     csv_data: List,
     adjacency_lists: List,
     branch_idx_removed: List,
@@ -176,7 +207,7 @@ def _save_generated_data(
     """Save the generated data to files.
 
     Args:
-        net: Pandapower network
+        net: Power network (pandapower or pypowsybl)
         csv_data: List of CSV data
         adjacency_lists: List of adjacency lists
         branch_idx_removed: List of removed branch indices
@@ -326,10 +357,16 @@ def generate_power_flow_data(
     )
     # Plot features
     if os.path.exists(file_paths["node_data"]):
+        # Get base MVA depending on network type
+        if isinstance(net, pandapowerNet):
+            base_mva = net.sn_mva
+        else:  # pypowsybl
+            base_mva = net.nominal_apparent_power if hasattr(net, 'nominal_apparent_power') else 100.0
+
         plot_feature_distributions(
             file_paths["node_data"],
             file_paths["feature_plots"],
-            net.sn_mva,
+            base_mva,
         )
     else:
         print("No node data file generated. Skipping feature plotting.")
@@ -500,10 +537,16 @@ def generate_power_flow_data_distributed(
     # Plot features
     # check if node_data csv file exists
     if os.path.exists(file_paths["node_data"]):
+        # Get base MVA depending on network type
+        if isinstance(net, pandapowerNet):
+            base_mva = net.sn_mva
+        else:  # pypowsybl
+            base_mva = net.nominal_apparent_power if hasattr(net, 'nominal_apparent_power') else 100.0
+
         plot_feature_distributions(
             file_paths["node_data"],
             file_paths["feature_plots"],
-            net.sn_mva,
+            base_mva,
         )
     else:
         print("No node data file generated. Skipping feature plotting.")

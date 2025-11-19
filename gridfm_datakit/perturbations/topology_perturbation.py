@@ -1,11 +1,15 @@
 import numpy as np
 import pandapower as pp
+from pandapower.auxiliary import pandapowerNet
+from pypowsybl.network import Network
 import copy
 from itertools import combinations
 from abc import ABC, abstractmethod
 import pandapower.topology as top
 import warnings
 from typing import Generator, List, Union
+from gridfm_datakit.network_interface import NetworkInterface, copy_network
+from gridfm_datakit.process.network_utils import check_network_feasibility
 
 
 # Abstract base class for topology generation
@@ -19,12 +23,12 @@ class TopologyGenerator(ABC):
     @abstractmethod
     def generate(
         self,
-        net: pp.pandapowerNet,
-    ) -> Union[Generator[pp.pandapowerNet, None, None], List[pp.pandapowerNet]]:
+        net: Union[pandapowerNet, Network],
+    ) -> Union[Generator[Union[pandapowerNet, Network], None, None], List[Union[pandapowerNet, Network]]]:
         """Generate perturbed topologies.
 
         Args:
-            net: The power network to perturb.
+            net: The power network to perturb (pandapower or pypowsybl).
 
         Yields:
             A perturbed network topology.
@@ -37,12 +41,12 @@ class NoPerturbationGenerator(TopologyGenerator):
 
     def generate(
         self,
-        net: pp.pandapowerNet,
-    ) -> Generator[pp.pandapowerNet, None, None]:
+        net: Union[pandapowerNet, Network],
+    ) -> Generator[Union[pandapowerNet, Network], None, None]:
         """Yield the original network without any perturbations.
 
         Args:
-            net: The power network.
+            net: The power network (pandapower or pypowsybl).
 
         Yields:
             The original power network.
@@ -64,12 +68,12 @@ class NMinusKGenerator(TopologyGenerator):
         component_combinations: List of all possible combinations of components to drop.
     """
 
-    def __init__(self, k: int, base_net: pp.pandapowerNet) -> None:
+    def __init__(self, k: int, base_net: Union[pandapowerNet, Network]) -> None:
         """Initialize the N-k generator.
 
         Args:
             k: Maximum number of components to drop.
-            base_net: The base power network.
+            base_net: The base power network (pandapower or pypowsybl).
 
         Raises:
             ValueError: If k is 0.
@@ -84,9 +88,13 @@ class NMinusKGenerator(TopologyGenerator):
             )
         self.k = k
 
-        # Prepare the list of components to drop
-        self.components_to_drop = [(index, "line") for index in base_net.line.index] + [
-            (index, "trafo") for index in base_net.trafo.index
+        # Prepare the list of components to drop using adapter
+        adapter = NetworkInterface.create_adapter(base_net)
+        lines = adapter.get_lines()
+        trafos = adapter.get_transformers()
+
+        self.components_to_drop = [(index, "line") for index in lines.index] + [
+            (index, "trafo") for index in trafos.index
         ]
 
         # Generate all combinations of at most k components
@@ -100,31 +108,45 @@ class NMinusKGenerator(TopologyGenerator):
 
     def generate(
         self,
-        net: pp.pandapowerNet,
-    ) -> Generator[pp.pandapowerNet, None, None]:
+        net: Union[pandapowerNet, Network],
+    ) -> Generator[Union[pandapowerNet, Network], None, None]:
         """Generate perturbed topologies by dropping components.
 
         Args:
-            net: The power network.
+            net: The power network (pandapower or pypowsybl).
 
         Yields:
             A perturbed network topology with at most k components removed.
         """
         for selected_components in self.component_combinations:
-            perturbed_topology = copy.deepcopy(net)
+            perturbed_topology = copy_network(net)
+            adapter = NetworkInterface.create_adapter(perturbed_topology)
 
             # Separate lines and transformers
             lines_to_drop = [e[0] for e in selected_components if e[1] == "line"]
             trafos_to_drop = [e[0] for e in selected_components if e[1] == "trafo"]
 
-            # Drop selected lines and transformers
+            # Drop selected lines and transformers using adapter
             if lines_to_drop:
-                perturbed_topology.line.loc[lines_to_drop, "in_service"] = False
+                lines = adapter.get_lines()
+                if isinstance(net, pandapowerNet):
+                    lines.loc[lines_to_drop, "in_service"] = False
+                else:  # pypowsybl
+                    lines.loc[lines_to_drop, "connected1"] = False
+                    lines.loc[lines_to_drop, "connected2"] = False
+                adapter.update_lines(lines)
+
             if trafos_to_drop:
-                perturbed_topology.trafo.loc[trafos_to_drop, "in_service"] = False
+                trafos = adapter.get_transformers()
+                if isinstance(net, pandapowerNet):
+                    trafos.loc[trafos_to_drop, "in_service"] = False
+                else:  # pypowsybl
+                    trafos.loc[trafos_to_drop, "connected1"] = False
+                    trafos.loc[trafos_to_drop, "connected2"] = False
+                adapter.update_transformers(trafos)
 
             # Check network feasibility and yield the topology
-            if not len(top.unsupplied_buses(perturbed_topology)):
+            if check_network_feasibility(perturbed_topology):
                 yield perturbed_topology
 
 
@@ -144,7 +166,7 @@ class RandomComponentDropGenerator(TopologyGenerator):
         self,
         n_topology_variants: int,
         k: int,
-        base_net: pp.pandapowerNet,
+        base_net: Union[pandapowerNet, Network],
         elements: List[str] = ["line", "trafo", "gen", "sgen"],
     ) -> None:
         """Initialize the random component drop generator.
@@ -152,28 +174,47 @@ class RandomComponentDropGenerator(TopologyGenerator):
         Args:
             n_topology_variants: Number of topology variants to generate.
             k: Maximum number of components to drop.
-            base_net: The base power network.
+            base_net: The base power network (pandapower or pypowsybl).
             elements: List of element types to consider for dropping.
         """
         super().__init__()
         self.n_topology_variants = n_topology_variants
         self.k = k
 
-        # Create a list of all components that can be dropped
+        # Create a list of all components that can be dropped using adapter
+        adapter = NetworkInterface.create_adapter(base_net)
         self.components_to_drop = []
+
         for element in elements:
-            self.components_to_drop.extend(
-                [(index, element) for index in base_net[element].index],
-            )
+            if element == "line":
+                lines = adapter.get_lines()
+                self.components_to_drop.extend(
+                    [(index, "line") for index in lines.index]
+                )
+            elif element == "trafo":
+                trafos = adapter.get_transformers()
+                self.components_to_drop.extend(
+                    [(index, "trafo") for index in trafos.index]
+                )
+            elif element == "gen":
+                gens = adapter.get_generators()
+                self.components_to_drop.extend(
+                    [(index, "gen") for index in gens.index]
+                )
+            elif element == "sgen":
+                sgens = adapter.get_static_generators()
+                self.components_to_drop.extend(
+                    [(index, "sgen") for index in sgens.index]
+                )
 
     def generate(
         self,
-        net: pp.pandapowerNet,
-    ) -> Generator[pp.pandapowerNet, None, None]:
+        net: Union[pandapowerNet, Network],
+    ) -> Generator[Union[pandapowerNet, Network], None, None]:
         """Generate perturbed topologies by randomly setting components out of service.
 
         Args:
-            net: The power network.
+            net: The power network (pandapower or pypowsybl).
 
         Yields:
             A perturbed network topology.
@@ -182,7 +223,8 @@ class RandomComponentDropGenerator(TopologyGenerator):
 
         # Stop after we generated n_topology_variants
         while n_generated_topologies < self.n_topology_variants:
-            perturbed_topology = copy.deepcopy(net)
+            perturbed_topology = copy_network(net)
+            adapter = NetworkInterface.create_adapter(perturbed_topology)
 
             # draw the number of components to drop from a uniform distribution
             r = np.random.randint(
@@ -208,15 +250,40 @@ class RandomComponentDropGenerator(TopologyGenerator):
 
             # Drop selected lines and transformers, turn off generators and static generators
             if lines_to_drop:
-                perturbed_topology.line.loc[lines_to_drop, "in_service"] = False
+                lines = adapter.get_lines()
+                if isinstance(net, pandapowerNet):
+                    lines.loc[lines_to_drop, "in_service"] = False
+                else:  # pypowsybl
+                    lines.loc[lines_to_drop, "connected1"] = False
+                    lines.loc[lines_to_drop, "connected2"] = False
+                adapter.update_lines(lines)
+
             if trafos_to_drop:
-                perturbed_topology.trafo.loc[trafos_to_drop, "in_service"] = False
+                trafos = adapter.get_transformers()
+                if isinstance(net, pandapowerNet):
+                    trafos.loc[trafos_to_drop, "in_service"] = False
+                else:  # pypowsybl
+                    trafos.loc[trafos_to_drop, "connected1"] = False
+                    trafos.loc[trafos_to_drop, "connected2"] = False
+                adapter.update_transformers(trafos)
+
             if gens_to_turn_off:
-                perturbed_topology.gen.loc[gens_to_turn_off, "in_service"] = False
+                gens = adapter.get_generators()
+                if isinstance(net, pandapowerNet):
+                    gens.loc[gens_to_turn_off, "in_service"] = False
+                else:  # pypowsybl
+                    gens.loc[gens_to_turn_off, "connected"] = False
+                adapter.update_generators(gens)
+
             if sgens_to_turn_off:
-                perturbed_topology.sgen.loc[sgens_to_turn_off, "in_service"] = False
+                sgens = adapter.get_static_generators()
+                if isinstance(net, pandapowerNet):
+                    sgens.loc[sgens_to_turn_off, "in_service"] = False
+                else:  # pypowsybl
+                    sgens.loc[sgens_to_turn_off, "connected"] = False
+                adapter.update_static_generators(sgens)
 
             # Check network feasibility and yield the topology
-            if not len(top.unsupplied_buses(perturbed_topology)):
+            if check_network_feasibility(perturbed_topology):
                 yield perturbed_topology
                 n_generated_topologies += 1
