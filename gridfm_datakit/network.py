@@ -1,11 +1,15 @@
 import os
 import tempfile
+from typing import Union, Dict, Any
+from dataclasses import dataclass
 from pandapower.auxiliary import pandapowerNet
 import requests
 from importlib import resources
 import pandapower as pp
 import pypowsybl.network as ppsn
+import pypowsybl as ppsy
 import pandapower.networks as pn
+import pandas as pd
 import warnings
 
 
@@ -103,6 +107,28 @@ _PYPOWSYBL_GRID_MAP = {
     "case118_ieee": ppsn.create_ieee118,
     "case300_ieee": ppsn.create_ieee300,
 }
+
+
+@dataclass
+class PyPowSyBlNetwork:
+    """Container for pypowsybl network with metadata needed for processing.
+
+    Attributes:
+        network: The native pypowsybl Network object.
+        bus_id_to_idx: Mapping from pypowsybl bus IDs (str) to integer indices.
+        idx_to_bus_id: Mapping from integer indices to pypowsybl bus IDs.
+        load_ids: List of load IDs in order matching scenario arrays.
+        nominal_voltages: Dict mapping bus ID to nominal voltage in kV.
+        n_buses: Number of buses in the network.
+        n_loads: Number of loads in the network.
+    """
+    network: ppsy.network.Network
+    bus_id_to_idx: Dict[str, int]
+    idx_to_bus_id: Dict[int, str]
+    load_ids: list
+    nominal_voltages: Dict[str, float]
+    n_buses: int
+    n_loads: int
 
 
 def _normalize_network_for_opf(net: pandapowerNet) -> None:
@@ -209,17 +235,17 @@ def _normalize_network_for_opf(net: pandapowerNet) -> None:
                 net.trafo.loc[idx, "vkr_percent"] = old_vkr * (new_sn / old_sn)
 
 
-def load_net_from_pypowsybl(grid_name: str) -> pandapowerNet:
-    """Loads a network from PyPowSyBl and converts it to pandapower format.
+def load_net_from_pypowsybl(grid_name: str) -> PyPowSyBlNetwork:
+    """Loads a network from PyPowSyBl as a native pypowsybl Network.
 
-    Creates a PyPowSyBl IEEE test case, exports to MATPOWER format, then imports
-    into pandapower. Buses are reindexed to ensure continuous indices.
+    Creates a PyPowSyBl IEEE test case and returns it wrapped with metadata
+    needed for power flow processing and output generation.
 
     Args:
         grid_name: Name of the grid (e.g., 'case30_ieee', 'case118_ieee').
 
     Returns:
-        pandapowerNet: Loaded power network configuration with reindexed buses.
+        PyPowSyBlNetwork: Container with native network and processing metadata.
 
     Raises:
         ValueError: If grid_name is not a supported IEEE test case.
@@ -231,29 +257,32 @@ def load_net_from_pypowsybl(grid_name: str) -> pandapowerNet:
         )
 
     # Create pypowsybl network
-    psy_net = _PYPOWSYBL_GRID_MAP[grid_name]()
+    network = _PYPOWSYBL_GRID_MAP[grid_name]()
 
-    # Export to MATPOWER via temp file
-    with tempfile.NamedTemporaryFile(suffix=".mat", delete=False) as f:
-        matpower_path = f.name
+    # Build bus ID to index mapping
+    buses = network.get_buses()
+    bus_ids = list(buses.index)
+    bus_id_to_idx = {bus_id: idx for idx, bus_id in enumerate(bus_ids)}
+    idx_to_bus_id = {idx: bus_id for bus_id, idx in bus_id_to_idx.items()}
 
-    try:
-        psy_net.save(matpower_path, format="MATPOWER")
+    # Get load IDs in consistent order
+    loads = network.get_loads()
+    load_ids = list(loads.index)
 
-        # Import into pandapower
-        warnings.filterwarnings("ignore", category=FutureWarning)
-        network = pp.converter.from_mpc(matpower_path)
-        warnings.resetwarnings()
-    finally:
-        os.unlink(matpower_path)
+    # Build nominal voltage mapping (bus_id -> kV)
+    voltage_levels = network.get_voltage_levels()
+    buses_df = network.get_buses()
+    nominal_voltages = {}
+    for bus_id in bus_ids:
+        vl_id = buses_df.loc[bus_id, "voltage_level_id"]
+        nominal_voltages[bus_id] = voltage_levels.loc[vl_id, "nominal_v"]
 
-    # Reindex buses to ensure continuous indices
-    old_bus_indices = network.bus.index
-    new_bus_indices = range(len(network.bus))
-    bus_mapping = dict(zip(old_bus_indices, new_bus_indices))
-    pp.reindex_buses(network, bus_mapping)
-
-    # Normalize for OPF compatibility
-    _normalize_network_for_opf(network)
-
-    return network
+    return PyPowSyBlNetwork(
+        network=network,
+        bus_id_to_idx=bus_id_to_idx,
+        idx_to_bus_id=idx_to_bus_id,
+        load_ids=load_ids,
+        nominal_voltages=nominal_voltages,
+        n_buses=len(bus_ids),
+        n_loads=len(load_ids),
+    )

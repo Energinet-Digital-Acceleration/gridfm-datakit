@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 from pandapower.auxiliary import pandapowerNet
 from typing import Any, Tuple
+import pypowsybl.loadflow as pplf
+from gridfm_datakit.network import PyPowSyBlNetwork
 
 
 def run_opf(net: pandapowerNet, **kwargs: Any) -> bool:
@@ -289,3 +291,27 @@ def calculate_power_imbalance(net: pandapowerNet) -> Tuple[float, float]:
     )
 
     return total_p_diff / num_buses, total_q_diff / num_buses
+
+
+def run_pf_pypowsybl(psy_net: PyPowSyBlNetwork, **kwargs: Any) -> bool:
+    """Runs AC Power Flow on a pypowsybl network.
+
+    Args:
+        psy_net: PyPowSyBlNetwork container with network and metadata.
+        **kwargs: Additional keyword arguments to pass to pypowsybl.loadflow.run_ac().
+
+    Returns:
+        bool: True if the power flow converged successfully, False otherwise.
+    """
+    results = pplf.run_ac(psy_net.network, **kwargs)
+
+    # Check convergence - results is a list of ComponentResult
+    if not results:
+        return False
+
+    # All connected components must converge
+    for result in results:
+        if result.status.name != "CONVERGED":
+            return False
+
+    return True

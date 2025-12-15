@@ -2,17 +2,18 @@ import numpy as np
 import pandas as pd
 from gridfm_datakit.utils.config import PQ, PV, REF
 from pandapower.auxiliary import pandapowerNet
-from typing import Tuple, List, Union
+from typing import Tuple, List, Union, Dict
 from pandapower import makeYbus_pypower
 import pandapower as pp
 import copy
-from gridfm_datakit.process.solvers import run_opf, run_pf
+from gridfm_datakit.process.solvers import run_opf, run_pf, run_pf_pypowsybl
 from pandapower.pypower.idx_brch import BR_STATUS
 from queue import Queue
 from gridfm_datakit.utils.stats import Stats
 from gridfm_datakit.perturbations.topology_perturbation import TopologyGenerator
 from gridfm_datakit.perturbations.generator_perturbation import GenerationGenerator
 from gridfm_datakit.perturbations.admittance_perturbation import AdmittanceGenerator
+from gridfm_datakit.network import PyPowSyBlNetwork
 import traceback
 
 
@@ -226,6 +227,328 @@ def get_branch_idx_removed(branch: np.ndarray) -> List[int]:
     """
     in_service = branch[:, BR_STATUS]
     return np.where(in_service == 0)[0].tolist()
+
+
+# ============================================================================
+# PyPowSyBl-specific processing functions
+# ============================================================================
+
+
+def pypowsybl_post_processing(psy_net: PyPowSyBlNetwork) -> np.ndarray:
+    """Post-processes pypowsybl power flow data to match pf_node.csv format.
+
+    Creates a matrix of shape (n_buses, 10) with columns:
+    (bus, Pd, Qd, Pg, Qg, Vm, Va, PQ, PV, REF)
+
+    Args:
+        psy_net: PyPowSyBlNetwork container with network and metadata.
+
+    Returns:
+        numpy.ndarray: Matrix containing the processed power flow data.
+    """
+    network = psy_net.network
+    n_buses = psy_net.n_buses
+
+    X = np.zeros((n_buses, 10))
+
+    # Get data from pypowsybl
+    buses = network.get_buses()
+    loads = network.get_loads()
+    generators = network.get_generators()
+
+    # Column 0: bus index
+    X[:, 0] = np.arange(n_buses)
+
+    # Columns 1-2: Pd, Qd (load demand) - aggregate by bus
+    for load_id, load_row in loads.iterrows():
+        bus_id = load_row["bus_id"]
+        if bus_id in psy_net.bus_id_to_idx:
+            bus_idx = psy_net.bus_id_to_idx[bus_id]
+            X[bus_idx, 1] += load_row["p"]  # Pd
+            X[bus_idx, 2] += load_row["q"]  # Qd
+
+    # Columns 3-4: Pg, Qg (generation) - aggregate by bus
+    # Note: pypowsybl uses load convention (negative = generating), so we negate
+    gen_buses = set()
+    slack_bus_idx = None
+
+    for gen_id, gen_row in generators.iterrows():
+        bus_id = gen_row["bus_id"]
+        if bus_id in psy_net.bus_id_to_idx:
+            bus_idx = psy_net.bus_id_to_idx[bus_id]
+            X[bus_idx, 3] += -gen_row["p"]  # Pg (negate)
+            X[bus_idx, 4] += -gen_row["q"]  # Qg (negate)
+            gen_buses.add(bus_idx)
+
+            # First generator with voltage regulator is likely slack/REF
+            if gen_row["voltage_regulator_on"] and slack_bus_idx is None:
+                slack_bus_idx = bus_idx
+
+    # If no slack identified, use first generator bus
+    if slack_bus_idx is None and gen_buses:
+        slack_bus_idx = min(gen_buses)
+
+    # Columns 5-6: Vm (p.u.), Va (degrees)
+    for bus_id, bus_row in buses.iterrows():
+        if bus_id in psy_net.bus_id_to_idx:
+            bus_idx = psy_net.bus_id_to_idx[bus_id]
+            nominal_v = psy_net.nominal_voltages[bus_id]
+            X[bus_idx, 5] = bus_row["v_mag"] / nominal_v  # Vm in p.u.
+            X[bus_idx, 6] = bus_row["v_angle"]  # Va in degrees
+
+    # Columns 7-9: PQ, PV, REF (one-hot encoded bus types)
+    for bus_idx in range(n_buses):
+        if bus_idx == slack_bus_idx:
+            X[bus_idx, 9] = 1.0  # REF
+        elif bus_idx in gen_buses:
+            X[bus_idx, 8] = 1.0  # PV
+        else:
+            X[bus_idx, 7] = 1.0  # PQ
+
+    return X
+
+
+def get_adjacency_list_pypowsybl(psy_net: PyPowSyBlNetwork) -> np.ndarray:
+    """Gets adjacency list (Y-bus) for pypowsybl network.
+
+    Builds the bus admittance matrix from lines and transformers,
+    then returns it as an adjacency list with G (conductance) and B (susceptance).
+
+    Args:
+        psy_net: PyPowSyBlNetwork container with network and metadata.
+
+    Returns:
+        numpy.ndarray: Array containing edge indices and attributes (G, B).
+    """
+    network = psy_net.network
+    n_buses = psy_net.n_buses
+
+    # Initialize Y-bus as dense matrix (complex)
+    Y_bus = np.zeros((n_buses, n_buses), dtype=complex)
+
+    # Get lines and transformers
+    lines = network.get_lines()
+    trafos = network.get_2_windings_transformers()
+
+    # Process lines
+    for line_id, line in lines.iterrows():
+        bus1_id = line["bus1_id"]
+        bus2_id = line["bus2_id"]
+
+        if bus1_id not in psy_net.bus_id_to_idx or bus2_id not in psy_net.bus_id_to_idx:
+            continue
+
+        i = psy_net.bus_id_to_idx[bus1_id]
+        j = psy_net.bus_id_to_idx[bus2_id]
+
+        # Get line parameters (in ohms and siemens)
+        r = line["r"]
+        x = line["x"]
+        b1 = line.get("b1", 0.0)
+        b2 = line.get("b2", 0.0)
+        g1 = line.get("g1", 0.0)
+        g2 = line.get("g2", 0.0)
+
+        # Convert to per-unit using bus nominal voltage
+        bus1_vn = psy_net.nominal_voltages[bus1_id]
+        z_base = bus1_vn ** 2 / 100.0  # baseMVA = 100
+
+        r_pu = r / z_base
+        x_pu = x / z_base
+        b1_pu = b1 * z_base
+        b2_pu = b2 * z_base
+        g1_pu = g1 * z_base
+        g2_pu = g2 * z_base
+
+        # Series admittance
+        z_series = complex(r_pu, x_pu)
+        if abs(z_series) > 1e-10:
+            y_series = 1.0 / z_series
+        else:
+            y_series = complex(0, 0)
+
+        # Shunt admittance at each end
+        y_shunt1 = complex(g1_pu, b1_pu)
+        y_shunt2 = complex(g2_pu, b2_pu)
+
+        # Add to Y-bus
+        Y_bus[i, i] += y_series + y_shunt1
+        Y_bus[j, j] += y_series + y_shunt2
+        Y_bus[i, j] -= y_series
+        Y_bus[j, i] -= y_series
+
+    # Process transformers
+    for trafo_id, trafo in trafos.iterrows():
+        bus1_id = trafo["bus1_id"]
+        bus2_id = trafo["bus2_id"]
+
+        if bus1_id not in psy_net.bus_id_to_idx or bus2_id not in psy_net.bus_id_to_idx:
+            continue
+
+        i = psy_net.bus_id_to_idx[bus1_id]
+        j = psy_net.bus_id_to_idx[bus2_id]
+
+        # Get transformer parameters
+        r = trafo["r"]
+        x = trafo["x"]
+        g = trafo.get("g", 0.0)
+        b = trafo.get("b", 0.0)
+
+        # Rated voltages for turns ratio
+        rated_u1 = trafo["rated_u1"]
+        rated_u2 = trafo["rated_u2"]
+
+        # Use primary side nominal voltage for base
+        bus1_vn = psy_net.nominal_voltages[bus1_id]
+        z_base = bus1_vn ** 2 / 100.0
+
+        r_pu = r / z_base
+        x_pu = x / z_base
+        g_pu = g * z_base
+        b_pu = b * z_base
+
+        # Turns ratio
+        tap = rated_u1 / rated_u2 if rated_u2 > 0 else 1.0
+
+        # Series admittance
+        z_series = complex(r_pu, x_pu)
+        if abs(z_series) > 1e-10:
+            y_series = 1.0 / z_series
+        else:
+            y_series = complex(0, 0)
+
+        # Shunt admittance
+        y_shunt = complex(g_pu, b_pu)
+
+        # Standard transformer model in Y-bus
+        Y_bus[i, i] += y_series / (tap ** 2) + y_shunt
+        Y_bus[j, j] += y_series
+        Y_bus[i, j] -= y_series / tap
+        Y_bus[j, i] -= y_series / tap
+
+    # Convert to adjacency list format
+    i_idx, j_idx = np.nonzero(Y_bus)
+    s = Y_bus[i_idx, j_idx]
+    G = np.real(s)
+    B = np.imag(s)
+
+    edge_index = np.column_stack((i_idx, j_idx))
+    edge_attr = np.stack((G, B)).T
+    adjacency_lists = np.column_stack((edge_index, edge_attr))
+    return adjacency_lists
+
+
+def process_scenario_pypowsybl(
+    psy_net: PyPowSyBlNetwork,
+    scenarios: np.ndarray,
+    scenario_index: int,
+    local_csv_data: List[np.ndarray],
+    local_adjacency_lists: List[np.ndarray],
+    error_log_file: str,
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """Processes a load scenario using pypowsybl native solver.
+
+    Args:
+        psy_net: PyPowSyBlNetwork container with network and metadata.
+        scenarios: Array of load scenarios of shape (n_loads, n_scenarios, 2).
+        scenario_index: Index of the current scenario.
+        local_csv_data: List to store processed CSV data.
+        local_adjacency_lists: List to store adjacency lists.
+        error_log_file: Path to error log file.
+
+    Returns:
+        Tuple containing:
+            - List of processed CSV data
+            - List of adjacency lists
+    """
+    import pandas as pd
+
+    # Apply the load scenario to the network
+    load_df = pd.DataFrame({
+        "id": psy_net.load_ids,
+        "p0": scenarios[:, scenario_index, 0],
+        "q0": scenarios[:, scenario_index, 1],
+    })
+    load_df = load_df.set_index("id")
+    psy_net.network.update_loads(load_df)
+
+    try:
+        # Run AC power flow
+        converged = run_pf_pypowsybl(psy_net)
+        if not converged:
+            with open(error_log_file, "a") as f:
+                f.write(f"Power flow did not converge at scenario {scenario_index}\n")
+            return local_csv_data, local_adjacency_lists
+
+    except Exception as e:
+        with open(error_log_file, "a") as f:
+            f.write(
+                f"Caught an exception at scenario {scenario_index} in run_pf_pypowsybl: {e}\n",
+            )
+        return local_csv_data, local_adjacency_lists
+
+    # Post-process results
+    local_csv_data.extend(pypowsybl_post_processing(psy_net))
+    local_adjacency_lists.append(get_adjacency_list_pypowsybl(psy_net))
+
+    return local_csv_data, local_adjacency_lists
+
+
+def process_scenario_chunk_pypowsybl(
+    start_idx: int,
+    end_idx: int,
+    scenarios: np.ndarray,
+    psy_net: PyPowSyBlNetwork,
+    progress_queue: Queue,
+    error_log_path: str,
+) -> Tuple[
+    Union[None, Exception],
+    Union[None, str],
+    List[np.ndarray],
+    List[np.ndarray],
+]:
+    """Process scenarios for pypowsybl networks (no topology/generation perturbation).
+
+    Args:
+        start_idx: Starting scenario index.
+        end_idx: Ending scenario index (exclusive).
+        scenarios: Array of load scenarios.
+        psy_net: PyPowSyBlNetwork container.
+        progress_queue: Queue for progress updates.
+        error_log_path: Path to error log file.
+
+    Returns:
+        Tuple containing:
+            - Exception if error occurred, None otherwise
+            - Traceback string if error, None otherwise
+            - List of processed CSV data
+            - List of adjacency lists
+    """
+    try:
+        local_csv_data = []
+        local_adjacency_lists = []
+
+        for scenario_index in range(start_idx, end_idx):
+            local_csv_data, local_adjacency_lists = process_scenario_pypowsybl(
+                psy_net,
+                scenarios,
+                scenario_index,
+                local_csv_data,
+                local_adjacency_lists,
+                error_log_path,
+            )
+            progress_queue.put(1)
+
+        return None, None, local_csv_data, local_adjacency_lists
+
+    except Exception as e:
+        with open(error_log_path, "a") as f:
+            f.write(f"Caught an exception in process_scenario_chunk_pypowsybl: {e}\n")
+            f.write(traceback.format_exc())
+            f.write("\n")
+        for _ in range(end_idx - start_idx):
+            progress_queue.put(1)
+        return e, traceback.format_exc(), None, None
 
 
 def process_scenario_contingency(

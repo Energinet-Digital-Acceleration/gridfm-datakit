@@ -1,106 +1,107 @@
-# PyPowSyBl Integration Work
+# PyPowSyBl Native Integration
 
 ## Overview
 
-This branch adds PyPowSyBl as an alternative power grid data source alongside pglib and pandapower.
+This branch adds PyPowSyBl as a native power grid data source using its own AC load flow solver, without converting to pandapower format.
 
 ## Running the IEEE 30 Cases
 
-Two config files demonstrate the same IEEE 30-bus network from different sources:
-
 ```bash
-# pglib source (OPF-modified data)
+# pglib source (OPF via pandapower)
 gridfm_datakit scripts/config/case30_ieee_mellson.yaml
 
-# pypowsybl source (original IEEE data)
+# pypowsybl source (native AC power flow)
 gridfm_datakit scripts/config/case30_ieee_pypowsybl.yaml
 ```
 
-Outputs go to:
-- `./data_out/pglib/case30_ieee/raw/`
-- `./data_out/pypowsybl/case30_ieee/raw/`
-
 ## Technical Approach
 
-### Problem
-PyPowSyBl returns `pypowsybl.Network` objects, but the pipeline expects `pandapowerNet`.
+### Architecture: Hybrid Path
 
-### Solution: PyPowSyBl → MATPOWER → pandapower
-
-```
-pypowsybl.Network  →  .mat file  →  pandapowerNet
-     (export)          (import)
-```
-
-Key steps in `load_net_from_pypowsybl()` (`gridfm_datakit/network.py`):
-1. Call pypowsybl's `create_ieee30()` (or similar)
-2. Export to temp MATPOWER file: `psy_net.save(path, format="MATPOWER")`
-3. Import into pandapower: `pp.converter.from_mpc(path)`
-4. Reindex buses to 0...n-1
-5. Normalize for OPF compatibility
-
-### Critical Fix: Transformer Impedance
-
-The MATPOWER converter assigns `sn_mva=99999` when unspecified, which broke transformer impedance calculation:
+Two parallel code paths based on `network.source`:
 
 ```
-vk_percent = x_pu × 100 × (sn_mva / baseMVA)
-           = 0.2  × 100 × (99999 / 100)
-           = 19,999%  ← caused OPF divergence
+source="pglib" | "pandapower" | "file":
+  → pandapowerNet → run_opf/run_pf → pf_post_processing → output
+
+source="pypowsybl":
+  → PyPowSyBlNetwork → run_ac() → pypowsybl_post_processing → output (same format)
 ```
 
-Fix in `_normalize_network_for_opf()`:
-```python
-if old_sn > 10000:
-    new_sn = 100.0  # base MVA
-    new_vk = old_vk * (new_sn / old_sn)  # scale proportionally
+### Why Native Instead of MATPOWER Conversion?
+
+The previous approach (`pypowsybl-matpower` branch) converted pypowsybl networks to pandapower via MATPOWER format:
+
+```
+pypowsybl.Network → .mat file → pandapowerNet
 ```
 
-## Output Comparison: pglib vs pypowsybl
+**Problems with MATPOWER conversion:**
+1. MATPOWER converter assigns `sn_mva=99999` for unspecified transformer ratings
+2. This caused transformer impedance (`vk_percent`) to be 1000x too high
+3. Required manual fixes in `_normalize_network_for_opf()`
+4. Conversion chain loses some network metadata
 
-### pf_edge.csv (Admittance Matrix)
+**Native approach advantages:**
+1. No format conversion - use pypowsybl directly
+2. Uses pypowsybl's own `loadflow.run_ac()` solver
+3. Simpler, more maintainable code
+4. Preserves original IEEE network parameters
 
-| Metric | Difference |
-|--------|------------|
-| G (conductance) | max 10⁻¹⁴, mean 10⁻¹⁶ |
-| B (susceptance) | max 10⁻¹⁴, mean 10⁻¹⁶ |
+### Key Components
 
-**Result: Identical** - differences at floating-point precision level. Both sources represent the same electrical network topology.
+| File | Function | Purpose |
+|------|----------|---------|
+| `network.py` | `load_net_from_pypowsybl()` | Returns `PyPowSyBlNetwork` container |
+| `network.py` | `PyPowSyBlNetwork` | Dataclass with network + metadata |
+| `solvers.py` | `run_pf_pypowsybl()` | Wrapper for pypowsybl AC load flow |
+| `process_network.py` | `pypowsybl_post_processing()` | Extracts pf_node.csv format |
+| `process_network.py` | `get_adjacency_list_pypowsybl()` | Builds Y-bus matrix |
+| `generate.py` | `generate_power_flow_data()` | Branches based on source type |
 
-### pf_node.csv (Power Flow Results)
+### Data Mapping
 
-| Metric | Max Diff | Mean Diff |
-|--------|----------|-----------|
-| Pd, Qd (loads) | 0.0 | 0.0 |
-| Pg (gen power) | 103.9 MW | 6.6 MW |
-| Vm (voltage mag) | 0.023 p.u. | 0.012 p.u. |
-| Va (voltage angle) | 2.8° | 2.2° |
+**pf_node.csv:**
+- `Vm`: `get_buses()['v_mag'] / nominal_v` → p.u.
+- `Va`: `get_buses()['v_angle']` → degrees
+- `Pg/Qg`: `-get_generators()['p'/'q']` (negate due to load convention)
+- `Pd/Qd`: `get_loads()['p'/'q']`
+- `PQ/PV/REF`: Derived from generator connections
 
-**Observations:**
-- **Load demands identical**: Same input scenarios applied to both
-- **Generator dispatch differs**: OPF finds different optimal operating points
-  - pglib: Concentrates generation at bus 0 (167 MW)
-  - pypowsybl: Distributes generation (64 MW bus 0, 100 MW bus 1)
-- **Voltage profiles differ**: Consequence of different dispatch
+**pf_edge.csv (Y-bus):**
+- Built from `get_lines()` and `get_2_windings_transformers()`
+- Line admittance: `y = 1/(r + jx)`, shunt: `jb`
+- Transformer model includes turns ratio
 
-### Why the Dispatch Differs
+## Limitations
 
-The difference is in **economic dispatch**, not physics. Both sources:
-- Use the same network topology (identical admittance)
-- Solve the same power flow equations
-- Apply the same load scenarios
+| Feature | pypowsybl | pandapower |
+|---------|-----------|------------|
+| AC Power Flow | ✓ | ✓ |
+| OPF | ✗ | ✓ |
+| Topology perturbation | ✗ | ✓ |
+| Generation perturbation | ✗ | ✓ |
+| Admittance perturbation | ✗ | ✓ |
+| Contingency mode | ✗ | ✓ |
 
-But pglib has OPF-modified cost curves that favor certain generators, while pypowsybl uses original IEEE reference data. Both are valid interpretations.
+**pypowsybl path only supports:**
+- `mode: "pf"`
+- `topology_perturbation.type: "none"`
 
-## Supported PyPowSyBl Grids
+## Supported Grids
 
 ```python
 _PYPOWSYBL_GRID_MAP = {
-    "case9_ieee": ppsn.create_ieee9,
-    "case14_ieee": ppsn.create_ieee14,
-    "case30_ieee": ppsn.create_ieee30,
-    "case57_ieee": ppsn.create_ieee57,
-    "case118_ieee": ppsn.create_ieee118,
-    "case300_ieee": ppsn.create_ieee300,
+    "case9_ieee": create_ieee9,
+    "case14_ieee": create_ieee14,
+    "case30_ieee": create_ieee30,
+    "case57_ieee": create_ieee57,
+    "case118_ieee": create_ieee118,
+    "case300_ieee": create_ieee300,
 }
 ```
+
+## Branch History
+
+- `pypowsybl-matpower`: MATPOWER conversion approach (preserved)
+- `pypowsybl`: Native pypowsybl solver approach (this branch)
