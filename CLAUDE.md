@@ -46,7 +46,8 @@ interactive_interface()
 ### Core Data Generation Pipeline
 
 1. **Network Loading** (`network.py`):
-   - Loads power grids from three sources: pandapower, pglib, or matpower files
+   - Loads power grids from four sources: pandapower, pglib, pypowsybl, or matpower files
+   - PyPowSyBl networks are converted via MATPOWER format and normalized for OPF compatibility
    - All networks are reindexed to ensure continuous bus indices
    - PGLib networks are automatically downloaded if not locally available
 
