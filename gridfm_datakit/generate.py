@@ -471,6 +471,60 @@ def generate_power_flow_data(
     return file_paths
 
 
+def _generate_pypowsybl_sequential(
+    psy_net: PyPowSyBlNetwork,
+    scenarios: np.ndarray,
+    args: NestedNamespace,
+    file_paths: Dict[str, str],
+    base_path: str,
+) -> Dict[str, str]:
+    """Sequential processing for pypowsybl networks (helper for distributed fallback).
+
+    Args:
+        psy_net: PyPowSyBlNetwork container
+        scenarios: Load scenarios array
+        args: Configuration object
+        file_paths: Dictionary of file paths
+        base_path: Base output directory
+
+    Returns:
+        Dictionary of file paths
+    """
+    csv_data = []
+    adjacency_lists = []
+
+    with open(file_paths["tqdm_log"], "a") as f:
+        with tqdm(
+            total=args.load.scenarios,
+            desc="Processing scenarios (pypowsybl)",
+            file=Tee(sys.stdout, f),
+            miniters=5,
+        ) as pbar:
+            for scenario_index in range(args.load.scenarios):
+                csv_data, adjacency_lists = process_scenario_pypowsybl(
+                    psy_net,
+                    scenarios,
+                    scenario_index,
+                    csv_data,
+                    adjacency_lists,
+                    file_paths["error_log"],
+                )
+                pbar.update(1)
+
+    _save_generated_data(
+        psy_net,
+        csv_data,
+        adjacency_lists,
+        [],  # branch_idx_removed
+        None,  # global_stats
+        file_paths,
+        base_path,
+        args,
+    )
+
+    return file_paths
+
+
 def generate_power_flow_data_distributed(
     config: Union[str, Dict, NestedNamespace],
 ) -> Dict[str, str]:
@@ -517,6 +571,11 @@ def generate_power_flow_data_distributed(
 
     # Prepare network and scenarios
     net, scenarios = _prepare_network_and_scenarios(args, file_paths)
+
+    # Check if using pypowsybl - fall back to sequential (pypowsybl networks not picklable)
+    if isinstance(net, PyPowSyBlNetwork):
+        print("Note: pypowsybl source uses sequential processing (multiprocessing not supported)")
+        return _generate_pypowsybl_sequential(net, scenarios, args, file_paths, base_path)
 
     # Initialize topology generator
     topology_generator = initialize_topology_generator(args.topology_perturbation, net)

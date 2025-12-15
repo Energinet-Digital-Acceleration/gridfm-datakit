@@ -311,8 +311,8 @@ def pypowsybl_post_processing(psy_net: PyPowSyBlNetwork) -> np.ndarray:
 def get_adjacency_list_pypowsybl(psy_net: PyPowSyBlNetwork) -> np.ndarray:
     """Gets adjacency list (Y-bus) for pypowsybl network.
 
-    Builds the bus admittance matrix from lines and transformers,
-    then returns it as an adjacency list with G (conductance) and B (susceptance).
+    Builds Y-bus matrix natively from pypowsybl network parameters.
+    Uses pypowsybl's per_unit mode to get values on 100 MVA base.
 
     Args:
         psy_net: PyPowSyBlNetwork container with network and metadata.
@@ -323,108 +323,97 @@ def get_adjacency_list_pypowsybl(psy_net: PyPowSyBlNetwork) -> np.ndarray:
     network = psy_net.network
     n_buses = psy_net.n_buses
 
-    # Initialize Y-bus as dense matrix (complex)
-    Y_bus = np.zeros((n_buses, n_buses), dtype=complex)
+    # Enable per-unit mode for correct parameter scaling
+    original_per_unit = network.per_unit
+    network.per_unit = True
 
-    # Get lines and transformers
-    lines = network.get_lines()
-    trafos = network.get_2_windings_transformers()
+    try:
+        # Initialize Y-bus as dense complex matrix
+        Y_bus = np.zeros((n_buses, n_buses), dtype=complex)
 
-    # Process lines
-    for line_id, line in lines.iterrows():
-        bus1_id = line["bus1_id"]
-        bus2_id = line["bus2_id"]
+        # Get voltage levels for tap ratio calculation
+        vls = network.get_voltage_levels()
 
-        if bus1_id not in psy_net.bus_id_to_idx or bus2_id not in psy_net.bus_id_to_idx:
-            continue
+        # Process lines (values now in per-unit)
+        lines = network.get_lines()
+        for line_id, line in lines.iterrows():
+            bus1_id = line["bus1_id"]
+            bus2_id = line["bus2_id"]
 
-        i = psy_net.bus_id_to_idx[bus1_id]
-        j = psy_net.bus_id_to_idx[bus2_id]
+            if bus1_id not in psy_net.bus_id_to_idx or bus2_id not in psy_net.bus_id_to_idx:
+                continue
 
-        # Get line parameters (in ohms and siemens)
-        r = line["r"]
-        x = line["x"]
-        b1 = line.get("b1", 0.0)
-        b2 = line.get("b2", 0.0)
-        g1 = line.get("g1", 0.0)
-        g2 = line.get("g2", 0.0)
+            i = psy_net.bus_id_to_idx[bus1_id]
+            j = psy_net.bus_id_to_idx[bus2_id]
 
-        # Convert to per-unit using bus nominal voltage
-        bus1_vn = psy_net.nominal_voltages[bus1_id]
-        z_base = bus1_vn ** 2 / 100.0  # baseMVA = 100
+            # In per-unit mode, r and x are already in p.u.
+            r_pu = line["r"]
+            x_pu = line["x"]
 
-        r_pu = r / z_base
-        x_pu = x / z_base
-        b1_pu = b1 * z_base
-        b2_pu = b2 * z_base
-        g1_pu = g1 * z_base
-        g2_pu = g2 * z_base
+            # Series admittance
+            z_pu = complex(r_pu, x_pu)
+            if abs(z_pu) > 1e-12:
+                y_series = 1.0 / z_pu
+            else:
+                y_series = 0.0
 
-        # Series admittance
-        z_series = complex(r_pu, x_pu)
-        if abs(z_series) > 1e-10:
-            y_series = 1.0 / z_series
-        else:
-            y_series = complex(0, 0)
+            # Shunt admittance (b1, b2 already in p.u. in per_unit mode)
+            b1_pu = line["b1"] if not np.isnan(line["b1"]) else 0.0
+            b2_pu = line["b2"] if not np.isnan(line["b2"]) else 0.0
+            y_shunt_1 = complex(0, b1_pu)
+            y_shunt_2 = complex(0, b2_pu)
 
-        # Shunt admittance at each end
-        y_shunt1 = complex(g1_pu, b1_pu)
-        y_shunt2 = complex(g2_pu, b2_pu)
+            # Add to Y-bus (pi-model)
+            Y_bus[i, i] += y_series + y_shunt_1
+            Y_bus[j, j] += y_series + y_shunt_2
+            Y_bus[i, j] -= y_series
+            Y_bus[j, i] -= y_series
 
-        # Add to Y-bus
-        Y_bus[i, i] += y_series + y_shunt1
-        Y_bus[j, j] += y_series + y_shunt2
-        Y_bus[i, j] -= y_series
-        Y_bus[j, i] -= y_series
+        # Process 2-winding transformers (values now in per-unit)
+        trafos = network.get_2_windings_transformers()
+        for trafo_id, trafo in trafos.iterrows():
+            bus1_id = trafo["bus1_id"]
+            bus2_id = trafo["bus2_id"]
 
-    # Process transformers
-    for trafo_id, trafo in trafos.iterrows():
-        bus1_id = trafo["bus1_id"]
-        bus2_id = trafo["bus2_id"]
+            if bus1_id not in psy_net.bus_id_to_idx or bus2_id not in psy_net.bus_id_to_idx:
+                continue
 
-        if bus1_id not in psy_net.bus_id_to_idx or bus2_id not in psy_net.bus_id_to_idx:
-            continue
+            i = psy_net.bus_id_to_idx[bus1_id]  # HV side
+            j = psy_net.bus_id_to_idx[bus2_id]  # LV side
 
-        i = psy_net.bus_id_to_idx[bus1_id]
-        j = psy_net.bus_id_to_idx[bus2_id]
+            # In per-unit mode, r and x are already in p.u.
+            r_pu = trafo["r"]
+            x_pu = trafo["x"]
 
-        # Get transformer parameters
-        r = trafo["r"]
-        x = trafo["x"]
-        g = trafo.get("g", 0.0)
-        b = trafo.get("b", 0.0)
+            z_pu = complex(r_pu, x_pu)
+            if abs(z_pu) > 1e-12:
+                y_series = 1.0 / z_pu
+            else:
+                y_series = 0.0
 
-        # Rated voltages for turns ratio
-        rated_u1 = trafo["rated_u1"]
-        rated_u2 = trafo["rated_u2"]
+            # Turns ratio (off-nominal tap)
+            vl1_id = trafo["voltage_level1_id"]
+            vl2_id = trafo["voltage_level2_id"]
+            V_nom_1 = vls.loc[vl1_id, "nominal_v"]  # kV
+            V_nom_2 = vls.loc[vl2_id, "nominal_v"]  # kV
+            rated_u1 = trafo["rated_u1"]  # kV
+            rated_u2 = trafo["rated_u2"]  # kV
 
-        # Use primary side nominal voltage for base
-        bus1_vn = psy_net.nominal_voltages[bus1_id]
-        z_base = bus1_vn ** 2 / 100.0
+            # Off-nominal tap ratio
+            a_nom = V_nom_1 / V_nom_2 if V_nom_2 != 0 else 1.0
+            a_actual = rated_u1 / rated_u2 if rated_u2 != 0 else 1.0
+            tap = a_actual / a_nom if a_nom != 0 else 1.0
 
-        r_pu = r / z_base
-        x_pu = x / z_base
-        g_pu = g * z_base
-        b_pu = b * z_base
+            # Transformer pi-model with tap on HV side
+            tap2 = tap * tap
+            Y_bus[i, i] += y_series / tap2
+            Y_bus[j, j] += y_series
+            Y_bus[i, j] -= y_series / tap
+            Y_bus[j, i] -= y_series / tap
 
-        # Turns ratio
-        tap = rated_u1 / rated_u2 if rated_u2 > 0 else 1.0
-
-        # Series admittance
-        z_series = complex(r_pu, x_pu)
-        if abs(z_series) > 1e-10:
-            y_series = 1.0 / z_series
-        else:
-            y_series = complex(0, 0)
-
-        # Shunt admittance
-        y_shunt = complex(g_pu, b_pu)
-
-        # Standard transformer model in Y-bus
-        Y_bus[i, i] += y_series / (tap ** 2) + y_shunt
-        Y_bus[j, j] += y_series
-        Y_bus[i, j] -= y_series / tap
-        Y_bus[j, i] -= y_series / tap
+    finally:
+        # Restore original per_unit setting
+        network.per_unit = original_per_unit
 
     # Convert to adjacency list format
     i_idx, j_idx = np.nonzero(Y_bus)

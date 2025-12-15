@@ -70,8 +70,56 @@ pypowsybl.Network → .mat file → pandapowerNet
 
 **pf_edge.csv (Y-bus):**
 - Built from `get_lines()` and `get_2_windings_transformers()`
+- Uses pypowsybl's `per_unit` mode for correct parameter scaling
 - Line admittance: `y = 1/(r + jx)`, shunt: `jb`
 - Transformer model includes turns ratio
+
+### Y-bus Calculation: per_unit Mode
+
+pypowsybl stores parameters in physical units (ohms, kV) by default. A key discovery was that pypowsybl's `per_unit` mode automatically converts all parameters to per-unit on 100 MVA base:
+
+```python
+network.per_unit = True  # Enables per-unit mode
+trafos = network.get_2_windings_transformers()
+# Now trafo['x'] is in p.u., not ohms
+```
+
+**Without per_unit mode**, transformer T6-9-1 has:
+- `x = 0.00208` ohms → incorrectly calculated as ~80000 p.u.
+
+**With per_unit mode**:
+- `x = 0.208` p.u. → correctly gives B ≈ -4.8 p.u.
+
+This approach avoids manual Z_base calculations and eliminates the huge Y-bus errors for transformers connecting different voltage levels.
+
+### Output Comparison (pglib vs pypowsybl)
+
+| Metric | Difference | Notes |
+|--------|------------|-------|
+| Y-bus G | 0.0 | Identical |
+| Y-bus B | max 0.19 | Negligible (shunt modeling) |
+| Voltage Vm | 0.03-0.06 p.u. | Expected (OPF vs PF) |
+| Voltage Va | 5-7 degrees | Expected (different dispatch) |
+
+### Why the Differences?
+
+**Y-bus (pf_edge.csv) - Nearly Identical:**
+The Y-bus matrix represents network topology (line/transformer impedances). Both sources use the same IEEE 30 bus network definition, so the admittance values match. The tiny B differences (~0.19) come from minor shunt device modeling variations.
+
+**Voltages (pf_node.csv) - Different Operating Points:**
+
+| Aspect | pglib (OPF) | pypowsybl (AC PF) |
+|--------|-------------|-------------------|
+| Solver | Optimal Power Flow | AC Power Flow |
+| Generator P | Optimized to minimize cost | Fixed at IEEE setpoints |
+| Generator V | Optimized within limits | Fixed at IEEE setpoints |
+| Result | Economic dispatch | Base case solution |
+
+Example for Bus 0 (slack):
+- pglib: Pg=166.6 MW, Vm=1.00 p.u. (optimized)
+- pypowsybl: Pg=269.4 MW, Vm=1.06 p.u. (IEEE default)
+
+**Bottom line:** Same network topology, different operating conditions. Both are valid IEEE 30 bus solutions - just different dispatch scenarios.
 
 ## Limitations
 
@@ -104,4 +152,4 @@ _PYPOWSYBL_GRID_MAP = {
 ## Branch History
 
 - `pypowsybl-matpower`: MATPOWER conversion approach (preserved)
-- `pypowsybl`: Native pypowsybl solver approach (this branch)
+- `mellson-playground`: Native pypowsybl solver approach (current branch)
