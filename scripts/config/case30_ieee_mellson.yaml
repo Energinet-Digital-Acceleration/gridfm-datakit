@@ -19,7 +19,7 @@ admittance_perturbation:
 
 settings:
   num_processes: 10 # Number of parallel processes to use
-  data_dir: "./data_out" # Directory to save generated data relative to the project root
+  data_dir: "./data_out/pglib" # Directory to save generated data relative to the project root
   large_chunk_size: 500 # Number of load scenarios processed before saving
   no_stats: true # If true, disables statistical calculations
   overwrite: true # If true, overwrites existing files, if false, appends to files (note that bus_params.csv, edge_params.csv, scenarios_{load.generator}.csv and scenarios_{load.generator}.html will still be overwritten)

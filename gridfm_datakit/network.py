@@ -1,9 +1,9 @@
 import os
+import tempfile
 from pandapower.auxiliary import pandapowerNet
 import requests
 from importlib import resources
 import pandapower as pp
-from pypowsybl.network import Network
 import pypowsybl.network as ppsn
 import pandapower.networks as pn
 import warnings
@@ -95,17 +95,165 @@ def load_net_from_pglib(grid_name: str) -> pandapowerNet:
 
     return network
 
-def load_net_from_pypowsybl(grid_name: str) -> Network:
-    if grid_name == "case9_ieee":
-        return ppsn.create_ieee9()
-    elif grid_name == "case14_ieee":
-        return ppsn.create_ieee14()
-    elif grid_name == "case30_ieee":
-        return ppsn.create_ieee30()
-    elif grid_name == "case57_ieee":
-        return ppsn.create_ieee57()
-    elif grid_name == "case118_ieee":
-        return ppsn.create_ieee118()
-    elif grid_name == "case300_ieee":
-        return ppsn.create_ieee300()
-    raise ValueError("Invalid grid name!")
+_PYPOWSYBL_GRID_MAP = {
+    "case9_ieee": ppsn.create_ieee9,
+    "case14_ieee": ppsn.create_ieee14,
+    "case30_ieee": ppsn.create_ieee30,
+    "case57_ieee": ppsn.create_ieee57,
+    "case118_ieee": ppsn.create_ieee118,
+    "case300_ieee": ppsn.create_ieee300,
+}
+
+
+def _normalize_network_for_opf(net: pandapowerNet) -> None:
+    """Normalizes a network to be OPF-compatible by setting missing constraints.
+
+    PyPowSyBl IEEE exports lack OPF-specific data like bus voltage limits,
+    generator power limits, and cost functions. This function adds sensible
+    defaults to make the network usable with pandapower's OPF solver.
+
+    The heuristics estimate thermal limits based on line impedances and
+    typical power system loading factors.
+
+    Args:
+        net: pandapower network to normalize (modified in-place).
+    """
+    import numpy as np
+
+    # Set bus voltage limits if missing/invalid (0.0 means unset)
+    default_min_vm = 0.94
+    default_max_vm = 1.06
+
+    if (net.bus["min_vm_pu"] == 0.0).any() or net.bus["min_vm_pu"].isna().any():
+        net.bus["min_vm_pu"] = default_min_vm
+
+    if (net.bus["max_vm_pu"] == 0.0).any() or net.bus["max_vm_pu"].isna().any():
+        net.bus["max_vm_pu"] = default_max_vm
+
+    # Normalize generator voltage setpoints to 1.0 pu (standard practice)
+    net.gen["vm_pu"] = 1.0
+    net.ext_grid["vm_pu"] = 1.0
+
+    # Set realistic generator power limits based on initial p_mw
+    for idx in net.gen.index:
+        p_mw = net.gen.loc[idx, "p_mw"]
+        if net.gen.loc[idx, "min_p_mw"] < -1000:
+            net.gen.loc[idx, "min_p_mw"] = 0.0
+        if net.gen.loc[idx, "max_p_mw"] > 1000:
+            # Set max to 2x initial or at least 100 MW
+            net.gen.loc[idx, "max_p_mw"] = max(p_mw * 2, 100.0) if p_mw > 0 else 0.0
+
+    # Set ext_grid limits if unbounded
+    for idx in net.ext_grid.index:
+        if net.ext_grid.loc[idx, "min_p_mw"] < -1000:
+            net.ext_grid.loc[idx, "min_p_mw"] = 0.0
+        if net.ext_grid.loc[idx, "max_p_mw"] > 1000:
+            # Estimate based on total load
+            total_load = net.load["p_mw"].sum()
+            net.ext_grid.loc[idx, "max_p_mw"] = total_load * 1.5
+        if net.ext_grid.loc[idx, "min_q_mvar"] < -1000:
+            net.ext_grid.loc[idx, "min_q_mvar"] = -net.load["q_mvar"].sum()
+        if net.ext_grid.loc[idx, "max_q_mvar"] > 1000:
+            net.ext_grid.loc[idx, "max_q_mvar"] = net.load["q_mvar"].sum()
+
+    # Add cost functions if missing (minimize total generation)
+    if len(net.poly_cost) == 0:
+        # Add cost for ext_grid
+        for idx in net.ext_grid.index:
+            pp.create_poly_cost(net, idx, "ext_grid", cp1_eur_per_mw=1.0)
+        # Add cost for generators
+        for idx in net.gen.index:
+            pp.create_poly_cost(net, idx, "gen", cp1_eur_per_mw=1.0)
+
+    # Calculate realistic line ratings based on impedance
+    # Using thermal limit estimation: I_max ≈ k * V_base / Z
+    # where k is a scaling factor for typical loading
+    for idx in net.line.index:
+        if net.line.loc[idx, "max_i_ka"] > 10000:
+            # Get line parameters
+            from_bus = int(net.line.loc[idx, "from_bus"])
+            vn_kv = net.bus.loc[from_bus, "vn_kv"]
+            r_ohm = net.line.loc[idx, "r_ohm_per_km"] * net.line.loc[idx, "length_km"]
+            x_ohm = net.line.loc[idx, "x_ohm_per_km"] * net.line.loc[idx, "length_km"]
+            z_ohm = np.sqrt(r_ohm**2 + x_ohm**2)
+
+            if z_ohm > 0:
+                # Estimate current rating: typical loading ~70% of thermal limit
+                # S_max ≈ V² / Z, I_max ≈ S_max / (√3 * V)
+                s_max_mva = (vn_kv**2 / z_ohm) * 0.3  # 30% of theoretical max
+                i_max_ka = s_max_mva / (np.sqrt(3) * vn_kv)
+                net.line.loc[idx, "max_i_ka"] = max(i_max_ka, 0.3)  # Min 0.3 kA
+            else:
+                net.line.loc[idx, "max_i_ka"] = 1.0  # Default for zero impedance
+
+    # Fix transformer ratings and impedance parameters
+    # MATPOWER converter assigns sn_mva=99999 when not specified, which causes
+    # vk_percent to be 1000x too high (vk_percent = x_pu * 100 * sn_mva/baseMVA)
+    # Fix: rescale sn_mva to baseMVA (100) and recalculate vk_percent
+    base_mva = 100.0  # Standard MATPOWER baseMVA
+    for idx in net.trafo.index:
+        old_sn = net.trafo.loc[idx, "sn_mva"]
+        if old_sn > 10000:
+            # Rescale vk_percent to maintain same impedance with new sn_mva
+            # vk_new = vk_old * (sn_new / sn_old)
+            old_vk = net.trafo.loc[idx, "vk_percent"]
+            new_sn = base_mva
+            new_vk = old_vk * (new_sn / old_sn)
+
+            net.trafo.loc[idx, "sn_mva"] = new_sn
+            net.trafo.loc[idx, "vk_percent"] = new_vk
+
+            # Also rescale vkr_percent if non-zero
+            old_vkr = net.trafo.loc[idx, "vkr_percent"]
+            if old_vkr != 0:
+                net.trafo.loc[idx, "vkr_percent"] = old_vkr * (new_sn / old_sn)
+
+
+def load_net_from_pypowsybl(grid_name: str) -> pandapowerNet:
+    """Loads a network from PyPowSyBl and converts it to pandapower format.
+
+    Creates a PyPowSyBl IEEE test case, exports to MATPOWER format, then imports
+    into pandapower. Buses are reindexed to ensure continuous indices.
+
+    Args:
+        grid_name: Name of the grid (e.g., 'case30_ieee', 'case118_ieee').
+
+    Returns:
+        pandapowerNet: Loaded power network configuration with reindexed buses.
+
+    Raises:
+        ValueError: If grid_name is not a supported IEEE test case.
+    """
+    if grid_name not in _PYPOWSYBL_GRID_MAP:
+        raise ValueError(
+            f"Invalid grid name: {grid_name}. "
+            f"Supported grids: {list(_PYPOWSYBL_GRID_MAP.keys())}"
+        )
+
+    # Create pypowsybl network
+    psy_net = _PYPOWSYBL_GRID_MAP[grid_name]()
+
+    # Export to MATPOWER via temp file
+    with tempfile.NamedTemporaryFile(suffix=".mat", delete=False) as f:
+        matpower_path = f.name
+
+    try:
+        psy_net.save(matpower_path, format="MATPOWER")
+
+        # Import into pandapower
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        network = pp.converter.from_mpc(matpower_path)
+        warnings.resetwarnings()
+    finally:
+        os.unlink(matpower_path)
+
+    # Reindex buses to ensure continuous indices
+    old_bus_indices = network.bus.index
+    new_bus_indices = range(len(network.bus))
+    bus_mapping = dict(zip(old_bus_indices, new_bus_indices))
+    pp.reindex_buses(network, bus_mapping)
+
+    # Normalize for OPF compatibility
+    _normalize_network_for_opf(network)
+
+    return network
