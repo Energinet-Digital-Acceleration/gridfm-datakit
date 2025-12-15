@@ -148,8 +148,3 @@ _PYPOWSYBL_GRID_MAP = {
     "case300_ieee": create_ieee300,
 }
 ```
-
-## Branch History
-
-- `pypowsybl-matpower`: MATPOWER conversion approach (preserved)
-- `mellson-playground`: Native pypowsybl solver approach (current branch)
